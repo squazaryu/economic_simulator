@@ -1,0 +1,11 @@
+pandas
+numpy
+scikit-learn
+plotly
+streamlit
+SALib
+yfinance
+aiomoex
+cbrapi
+joblib
+requests

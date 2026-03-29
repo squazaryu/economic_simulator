@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual env
+.venv/
+venv/
+
+# OS/IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Runtime artifacts
+models/*.pkl
+data/raw/*.csv
+data/processed/*.csv
+
+# Logs
+*.log
