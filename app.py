@@ -9,6 +9,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
+try:
+    from streamlit_plotly_events import plotly_events
+except ImportError:  # pragma: no cover - optional interactive dependency
+    plotly_events = None
 
 from src.data_loader import load_moex_stock, load_moex_tickers
 from src.model import (
@@ -434,7 +438,7 @@ def _historical_chart(
     return fig
 
 
-def _correlation_heatmap(df: pd.DataFrame, asset_type: str, ticker: str | None) -> go.Figure:
+def _correlation_columns(df: pd.DataFrame, asset_type: str, ticker: str | None) -> list[str]:
     cols = ["imoex_close", "key_rate", "usd_rub", "brent_usd", "inflation"]
 
     if asset_type == "stock" and ticker:
@@ -445,18 +449,42 @@ def _correlation_heatmap(df: pd.DataFrame, asset_type: str, ticker: str | None) 
     if asset_type == "portfolio" and "portfolio_index" in df.columns:
         cols.insert(0, "portfolio_index")
 
+    return cols
+
+
+def _factor_label_map(ticker: str | None = None) -> dict[str, str]:
+    label_map = {
+        "imoex_close": "IMOEX",
+        "key_rate": "Ключевая ставка",
+        "usd_rub": "USD/RUB",
+        "brent_usd": "Brent",
+        "inflation": "Инфляция",
+        "portfolio_index": "Портфель",
+    }
+    if ticker:
+        label_map[f"{ticker.lower()}_close"] = ticker.upper()
+    return label_map
+
+
+def _correlation_heatmap(df: pd.DataFrame, asset_type: str, ticker: str | None) -> go.Figure:
+    cols = _correlation_columns(df, asset_type, ticker)
+    labels = _factor_label_map(ticker)
     corr = df[cols].corr()
+    x_labels = [labels.get(c, c) for c in corr.columns]
+    y_labels = [labels.get(c, c) for c in corr.index]
+
     fig = go.Figure(
         data=go.Heatmap(
             z=corr.values,
-            x=corr.columns,
-            y=corr.index,
+            x=x_labels,
+            y=y_labels,
             zmin=-1,
             zmax=1,
             colorscale="RdBu",
             colorbar=dict(title="Corr"),
             text=np.round(corr.values, 2),
             texttemplate="%{text}",
+            customdata=np.array(corr.columns)[None, :].repeat(len(corr.index), axis=0),
         )
     )
     fig.update_layout(title="Корреляционная матрица", template="plotly_white")
@@ -464,16 +492,7 @@ def _correlation_heatmap(df: pd.DataFrame, asset_type: str, ticker: str | None) 
 
 
 def _correlation_insights(df: pd.DataFrame, asset_type: str, ticker: str | None) -> list[str]:
-    cols = ["imoex_close", "key_rate", "usd_rub", "brent_usd", "inflation"]
-
-    if asset_type == "stock" and ticker:
-        stock_col = f"{ticker.lower()}_close"
-        if stock_col in df.columns:
-            cols.insert(0, stock_col)
-
-    if asset_type == "portfolio" and "portfolio_index" in df.columns:
-        cols.insert(0, "portfolio_index")
-
+    cols = _correlation_columns(df, asset_type, ticker)
     corr = df[cols].corr()
     pairs: list[tuple[str, str, float]] = []
     for i, left in enumerate(corr.columns):
@@ -487,16 +506,7 @@ def _correlation_insights(df: pd.DataFrame, asset_type: str, ticker: str | None)
 
     strongest_abs = sorted(pairs, key=lambda x: abs(x[2]), reverse=True)[:3]
 
-    label_map = {
-        "imoex_close": "IMOEX",
-        "key_rate": "Ключевая ставка",
-        "usd_rub": "USD/RUB",
-        "brent_usd": "Brent",
-        "inflation": "Инфляция",
-        "portfolio_index": "Портфель",
-    }
-    if ticker:
-        label_map[f"{ticker.lower()}_close"] = ticker.upper()
+    label_map = _factor_label_map(ticker)
 
     insights = []
     for left, right, value in strongest_abs:
@@ -507,6 +517,47 @@ def _correlation_insights(df: pd.DataFrame, asset_type: str, ticker: str | None)
             f"{value:+.2f} ({strength}, {direction} связь)"
         )
     return insights
+
+
+def _correlation_drilldown_figure(df: pd.DataFrame, x_col: str, y_col: str, ticker: str | None) -> go.Figure:
+    subset = df[[x_col, y_col]].dropna().copy()
+    labels = _factor_label_map(ticker)
+    x_label = labels.get(x_col, x_col)
+    y_label = labels.get(y_col, y_col)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=subset[x_col],
+            y=subset[y_col],
+            mode="markers",
+            marker=dict(size=8, opacity=0.75, color="#1f77b4"),
+            name="Наблюдения",
+        )
+    )
+
+    corr_val = float(subset[x_col].corr(subset[y_col])) if len(subset) >= 2 else float("nan")
+    if len(subset) >= 2:
+        slope, intercept = np.polyfit(subset[x_col], subset[y_col], 1)
+        x_line = np.linspace(float(subset[x_col].min()), float(subset[x_col].max()), 50)
+        y_line = slope * x_line + intercept
+        fig.add_trace(
+            go.Scatter(
+                x=x_line,
+                y=y_line,
+                mode="lines",
+                line=dict(color="#d62728", width=2),
+                name="Линейный тренд",
+            )
+        )
+
+    fig.update_layout(
+        title=f"Drilldown: {x_label} vs {y_label} (corr={corr_val:+.2f})",
+        xaxis_title=x_label,
+        yaxis_title=y_label,
+        template="plotly_white",
+    )
+    return fig
 
 
 def _scenario_stress_index(controls: dict[str, float], adjustments: dict[str, float]) -> float:
@@ -911,8 +962,96 @@ def _trajectory_figure(
     return fig
 
 
-def _scenario_comparison(
-    defaults: dict[str, float],
+def _timeline_seed_frame(controls: dict[str, float], horizon_months: int) -> pd.DataFrame:
+    dates = pd.date_range(
+        start=pd.Timestamp.today().normalize() + pd.offsets.MonthEnd(1),
+        periods=horizon_months,
+        freq="ME",
+    )
+    return pd.DataFrame(
+        {
+            "date": dates,
+            "oil": [float(controls["oil"])] * horizon_months,
+            "key_rate": [float(controls["key_rate"])] * horizon_months,
+            "usd_rub": [float(controls["usd_rub"])] * horizon_months,
+            "inflation": [float(controls["inflation"])] * horizon_months,
+        }
+    )
+
+
+def _timeline_path_figure(
+    current_value: float,
+    timeline_df: pd.DataFrame,
+    predictions: np.ndarray,
+    asset_label: str,
+) -> go.Figure:
+    dates = [pd.Timestamp.today().normalize() + pd.offsets.MonthEnd(0), *pd.to_datetime(timeline_df["date"]).tolist()]
+    values = [float(current_value), *predictions.tolist()]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=dates,
+            y=values,
+            mode="lines+markers",
+            line=dict(width=3, color="#ff7f0e"),
+            name="Траектория по таймлайну",
+        )
+    )
+    fig.update_layout(
+        title=f"Ручной таймлайн-прогноз {asset_label}",
+        xaxis_title="Дата",
+        yaxis_title=f"Значение {asset_label}",
+        template="plotly_white",
+    )
+    return fig
+
+
+def _scenario_comparison_seed(defaults: dict[str, float], controls: dict[str, float]) -> pd.DataFrame:
+    presets = _preset_values(defaults)
+    rows = [
+        {
+            "Сценарий": "Текущий",
+            "Нефть": controls["oil"],
+            "Ставка": controls["key_rate"],
+            "USD/RUB": controls["usd_rub"],
+            "Инфляция": controls["inflation"],
+            "Сентимент": controls["market_sentiment"],
+            "Ликвидность": controls["liquidity_effect"],
+            "Геополитика": controls["geopolitics_effect"],
+            "Регуляторика": controls["regulatory_effect"],
+            "Волатильность": controls["uncertainty_scale"],
+        },
+        {
+            "Сценарий": "Оптимистичный",
+            "Нефть": presets["optimistic"]["oil"],
+            "Ставка": presets["optimistic"]["key_rate"],
+            "USD/RUB": presets["optimistic"]["usd_rub"],
+            "Инфляция": presets["optimistic"]["inflation"],
+            "Сентимент": presets["optimistic"]["market_sentiment"],
+            "Ликвидность": presets["optimistic"]["liquidity_effect"],
+            "Геополитика": presets["optimistic"]["geopolitics_effect"],
+            "Регуляторика": presets["optimistic"]["regulatory_effect"],
+            "Волатильность": presets["optimistic"]["uncertainty_scale"],
+        },
+        {
+            "Сценарий": "Пессимистичный",
+            "Нефть": presets["pessimistic"]["oil"],
+            "Ставка": presets["pessimistic"]["key_rate"],
+            "USD/RUB": presets["pessimistic"]["usd_rub"],
+            "Инфляция": presets["pessimistic"]["inflation"],
+            "Сентимент": presets["pessimistic"]["market_sentiment"],
+            "Ликвидность": presets["pessimistic"]["liquidity_effect"],
+            "Геополитика": presets["pessimistic"]["geopolitics_effect"],
+            "Регуляторика": presets["pessimistic"]["regulatory_effect"],
+            "Волатильность": presets["pessimistic"]["uncertainty_scale"],
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def _scenario_comparison_from_editor(
+    scenarios_df: pd.DataFrame,
     asset_type: str,
     ticker: str | None,
     regime: str,
@@ -920,23 +1059,32 @@ def _scenario_comparison(
     portfolio_tickers: list[str],
     portfolio_weights: dict[str, float],
 ) -> pd.DataFrame:
-    presets = _preset_values(defaults)
     rows: list[dict[str, Any]] = []
 
-    for key, cfg in [("base", "Базовый"), ("optimistic", "Оптимистичный"), ("pessimistic", "Пессимистичный")]:
-        sc = presets[key]
+    for idx, row in scenarios_df.iterrows():
+        def _num(value: Any, default: float) -> float:
+            parsed = pd.to_numeric(value, errors="coerce")
+            return float(default) if pd.isna(parsed) else float(parsed)
+
+        name = str(row.get("Сценарий", f"Сценарий {idx + 1}")).strip() or f"Сценарий {idx + 1}"
+        oil = _clamp(_num(row.get("Нефть", 80.0), 80.0), BASE_SLIDER_CONFIG["oil"])
+        key_rate = _clamp(_num(row.get("Ставка", 10.0), 10.0), BASE_SLIDER_CONFIG["key_rate"])
+        usd_rub = _clamp(_num(row.get("USD/RUB", 90.0), 90.0), BASE_SLIDER_CONFIG["usd_rub"])
+        inflation = _clamp(_num(row.get("Инфляция", 6.0), 6.0), BASE_SLIDER_CONFIG["inflation"])
+        uncertainty = _clamp(_num(row.get("Волатильность", 1.0), 1.0), ADDITIONAL_SLIDER_CONFIG["uncertainty_scale"])
+
         controls_sc = {
-            "oil": sc["oil"],
-            "key_rate": sc["key_rate"],
-            "usd_rub": sc["usd_rub"],
-            "inflation": sc["inflation"],
-            "uncertainty_scale": sc["uncertainty_scale"],
+            "oil": oil,
+            "key_rate": key_rate,
+            "usd_rub": usd_rub,
+            "inflation": inflation,
+            "uncertainty_scale": uncertainty,
         }
         adjustments_sc = {
-            "market_sentiment": sc["market_sentiment"],
-            "liquidity_effect": sc["liquidity_effect"],
-            "geopolitics_effect": sc["geopolitics_effect"],
-            "regulatory_effect": sc["regulatory_effect"],
+            "market_sentiment": _clamp(_num(row.get("Сентимент", 0.0), 0.0), ADDITIONAL_SLIDER_CONFIG["market_sentiment"]),
+            "liquidity_effect": _clamp(_num(row.get("Ликвидность", 0.0), 0.0), ADDITIONAL_SLIDER_CONFIG["liquidity_effect"]),
+            "geopolitics_effect": _clamp(_num(row.get("Геополитика", 0.0), 0.0), ADDITIONAL_SLIDER_CONFIG["geopolitics_effect"]),
+            "regulatory_effect": _clamp(_num(row.get("Регуляторика", 0.0), 0.0), ADDITIONAL_SLIDER_CONFIG["regulatory_effect"]),
         }
 
         pred, raw, _, _, _ = _predict_asset_snapshot(
@@ -953,7 +1101,7 @@ def _scenario_comparison(
 
         rows.append(
             {
-                "Сценарий": cfg,
+                "Сценарий": name,
                 "Базовый прогноз": round(raw, 2),
                 "Итоговый прогноз": round(pred, 2),
                 "Δ к текущему": round(pred - current, 2),
@@ -1005,7 +1153,27 @@ def main() -> None:
             """
         )
         st.plotly_chart(_historical_chart(plot_df, asset_type, ticker), use_container_width=True)
-        st.plotly_chart(_correlation_heatmap(plot_df, asset_type, ticker), use_container_width=True)
+        corr_fig = _correlation_heatmap(plot_df, asset_type, ticker)
+        corr_cols = _correlation_columns(plot_df, asset_type, ticker)
+        labels = _factor_label_map(ticker)
+        reverse_labels = {v: k for k, v in labels.items()}
+
+        if plotly_events is not None:
+            clicked = plotly_events(
+                corr_fig,
+                click_event=True,
+                select_event=False,
+                hover_event=False,
+                key="corr_heatmap_click",
+            )
+            if clicked:
+                x_raw = reverse_labels.get(str(clicked[0].get("x", "")))
+                y_raw = reverse_labels.get(str(clicked[0].get("y", "")))
+                if x_raw in corr_cols and y_raw in corr_cols and x_raw != y_raw:
+                    st.session_state["corr_pair"] = (x_raw, y_raw)
+        else:
+            st.plotly_chart(corr_fig, use_container_width=True)
+            st.caption("Для клика по матрице установите пакет `streamlit-plotly-events`.")
 
         with st.expander("Как читать корреляционную матрицу"):
             st.markdown(
@@ -1016,6 +1184,36 @@ def main() -> None:
                 - Ближе к `0`: явной линейной связи почти нет.
                 - Корреляция не доказывает причинность.
                 """
+            )
+
+        st.markdown("**Drilldown по паре факторов**")
+        if len(corr_cols) >= 2:
+            pair = st.session_state.get("corr_pair", (corr_cols[0], corr_cols[1]))
+            x_default = pair[0] if pair[0] in corr_cols else corr_cols[0]
+            y_pool = [c for c in corr_cols if c != x_default]
+            if not y_pool:
+                y_pool = corr_cols
+            y_default = pair[1] if pair[1] in y_pool else y_pool[0]
+
+            c_left, c_right = st.columns(2)
+            x_selected = c_left.selectbox(
+                "Фактор X",
+                corr_cols,
+                index=corr_cols.index(x_default),
+                format_func=lambda c: labels.get(c, c),
+            )
+            y_options = [c for c in corr_cols if c != x_selected] or corr_cols
+            y_selected = c_right.selectbox(
+                "Фактор Y",
+                y_options,
+                index=y_options.index(y_default if y_default in y_options else y_options[0]),
+                format_func=lambda c: labels.get(c, c),
+            )
+            st.session_state["corr_pair"] = (x_selected, y_selected)
+
+            st.plotly_chart(
+                _correlation_drilldown_figure(plot_df, x_selected, y_selected, ticker),
+                use_container_width=True,
             )
 
         insights = _correlation_insights(plot_df, asset_type, ticker)
@@ -1125,10 +1323,100 @@ def main() -> None:
         except Exception as exc:
             st.warning(f"Не удалось построить траектории прогноза: {exc}")
 
-        st.markdown("**Сравнение сценариев (side-by-side)**")
+        st.markdown("**Интерактивный таймлайн сценария (ручной ввод по месяцам)**")
+        timeline_seed_key = f"timeline_seed_{asset_type}_{ticker or 'imoex'}_{regime}_{horizon_months}"
+        if timeline_seed_key not in st.session_state:
+            st.session_state[timeline_seed_key] = _timeline_seed_frame(controls, horizon_months)
+
+        r1, r2 = st.columns([1, 2])
+        if r1.button("Сбросить таймлайн под текущие параметры", key=f"reset_{timeline_seed_key}"):
+            st.session_state[timeline_seed_key] = _timeline_seed_frame(controls, horizon_months)
+        r2.caption("Можно редактировать макропараметры для каждого месяца отдельно.")
+
+        timeline_df = st.data_editor(
+            st.session_state[timeline_seed_key],
+            hide_index=True,
+            use_container_width=True,
+            num_rows="fixed",
+            disabled=["date"],
+            column_config={
+                "date": st.column_config.DateColumn("Дата"),
+                "oil": st.column_config.NumberColumn("Нефть", min_value=BASE_SLIDER_CONFIG["oil"]["min"], max_value=BASE_SLIDER_CONFIG["oil"]["max"], step=BASE_SLIDER_CONFIG["oil"]["step"]),
+                "key_rate": st.column_config.NumberColumn("Ставка", min_value=BASE_SLIDER_CONFIG["key_rate"]["min"], max_value=BASE_SLIDER_CONFIG["key_rate"]["max"], step=BASE_SLIDER_CONFIG["key_rate"]["step"]),
+                "usd_rub": st.column_config.NumberColumn("USD/RUB", min_value=BASE_SLIDER_CONFIG["usd_rub"]["min"], max_value=BASE_SLIDER_CONFIG["usd_rub"]["max"], step=BASE_SLIDER_CONFIG["usd_rub"]["step"]),
+                "inflation": st.column_config.NumberColumn("Инфляция", min_value=BASE_SLIDER_CONFIG["inflation"]["min"], max_value=BASE_SLIDER_CONFIG["inflation"]["max"], step=BASE_SLIDER_CONFIG["inflation"]["step"]),
+            },
+            key=f"timeline_editor_{timeline_seed_key}",
+        )
+        st.session_state[timeline_seed_key] = timeline_df
+
         try:
-            cmp_df = _scenario_comparison(
-                defaults=defaults,
+            tl = timeline_df.copy()
+            tl["date"] = pd.to_datetime(tl["date"], errors="coerce")
+            if tl["date"].isna().any():
+                tl["date"] = _timeline_seed_frame(controls, horizon_months)["date"]
+            for factor in ("oil", "key_rate", "usd_rub", "inflation"):
+                cfg = BASE_SLIDER_CONFIG[factor]
+                tl[factor] = pd.to_numeric(tl[factor], errors="coerce").fillna(float(controls[factor])).clip(cfg["min"], cfg["max"])
+
+            timeline_predictions: list[float] = []
+            for _, step in tl.iterrows():
+                controls_step = dict(controls)
+                controls_step["oil"] = float(step["oil"])
+                controls_step["key_rate"] = float(step["key_rate"])
+                controls_step["usd_rub"] = float(step["usd_rub"])
+                controls_step["inflation"] = float(step["inflation"])
+                pred_step, _, _, _, _ = _predict_asset_snapshot(
+                    asset_type=asset_type,
+                    ticker=ticker,
+                    controls=controls_step,
+                    adjustments=adjustments,
+                    regime=regime,
+                    portfolio_tickers=portfolio_tickers,
+                    portfolio_weights=portfolio_weights,
+                )
+                timeline_predictions.append(float(pred_step))
+
+            timeline_pred_arr = np.asarray(timeline_predictions, dtype=float)
+            st.plotly_chart(
+                _timeline_path_figure(current, tl, timeline_pred_arr, asset_label=asset_label),
+                use_container_width=True,
+            )
+        except Exception as exc:
+            st.warning(f"Не удалось рассчитать ручной таймлайн: {exc}")
+
+        st.markdown("**Интерактивное сравнение 2-3 сценариев**")
+        scenario_count = st.radio("Количество сценариев", [2, 3], horizontal=True, key="scenario_count_compare")
+        compare_seed_key = f"compare_seed_{asset_type}_{ticker or 'imoex'}_{regime}"
+        if compare_seed_key not in st.session_state:
+            st.session_state[compare_seed_key] = _scenario_comparison_seed(defaults, controls)
+
+        if st.button("Сбросить таблицу сценариев", key=f"reset_{compare_seed_key}"):
+            st.session_state[compare_seed_key] = _scenario_comparison_seed(defaults, controls)
+
+        editor_df = st.data_editor(
+            st.session_state[compare_seed_key].head(int(scenario_count)).copy(),
+            hide_index=True,
+            use_container_width=True,
+            num_rows="fixed",
+            column_config={
+                "Сценарий": st.column_config.TextColumn("Сценарий"),
+                "Нефть": st.column_config.NumberColumn("Нефть", min_value=BASE_SLIDER_CONFIG["oil"]["min"], max_value=BASE_SLIDER_CONFIG["oil"]["max"], step=BASE_SLIDER_CONFIG["oil"]["step"]),
+                "Ставка": st.column_config.NumberColumn("Ставка", min_value=BASE_SLIDER_CONFIG["key_rate"]["min"], max_value=BASE_SLIDER_CONFIG["key_rate"]["max"], step=BASE_SLIDER_CONFIG["key_rate"]["step"]),
+                "USD/RUB": st.column_config.NumberColumn("USD/RUB", min_value=BASE_SLIDER_CONFIG["usd_rub"]["min"], max_value=BASE_SLIDER_CONFIG["usd_rub"]["max"], step=BASE_SLIDER_CONFIG["usd_rub"]["step"]),
+                "Инфляция": st.column_config.NumberColumn("Инфляция", min_value=BASE_SLIDER_CONFIG["inflation"]["min"], max_value=BASE_SLIDER_CONFIG["inflation"]["max"], step=BASE_SLIDER_CONFIG["inflation"]["step"]),
+                "Сентимент": st.column_config.NumberColumn("Сентимент", min_value=ADDITIONAL_SLIDER_CONFIG["market_sentiment"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["market_sentiment"]["max"], step=ADDITIONAL_SLIDER_CONFIG["market_sentiment"]["step"]),
+                "Ликвидность": st.column_config.NumberColumn("Ликвидность", min_value=ADDITIONAL_SLIDER_CONFIG["liquidity_effect"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["liquidity_effect"]["max"], step=ADDITIONAL_SLIDER_CONFIG["liquidity_effect"]["step"]),
+                "Геополитика": st.column_config.NumberColumn("Геополитика", min_value=ADDITIONAL_SLIDER_CONFIG["geopolitics_effect"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["geopolitics_effect"]["max"], step=ADDITIONAL_SLIDER_CONFIG["geopolitics_effect"]["step"]),
+                "Регуляторика": st.column_config.NumberColumn("Регуляторика", min_value=ADDITIONAL_SLIDER_CONFIG["regulatory_effect"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["regulatory_effect"]["max"], step=ADDITIONAL_SLIDER_CONFIG["regulatory_effect"]["step"]),
+                "Волатильность": st.column_config.NumberColumn("Волатильность", min_value=ADDITIONAL_SLIDER_CONFIG["uncertainty_scale"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["uncertainty_scale"]["max"], step=ADDITIONAL_SLIDER_CONFIG["uncertainty_scale"]["step"]),
+            },
+            key=f"editor_{compare_seed_key}_{scenario_count}",
+        )
+
+        try:
+            cmp_df = _scenario_comparison_from_editor(
+                scenarios_df=editor_df,
                 asset_type=asset_type,
                 ticker=ticker,
                 regime=regime,
@@ -1143,14 +1431,25 @@ def main() -> None:
                 go.Bar(
                     x=cmp_df["Сценарий"],
                     y=cmp_df["Итоговый прогноз"],
-                    marker_color=["#1f77b4", "#2ca02c", "#d62728"],
+                    marker_color=["#1f77b4", "#2ca02c", "#d62728"][: len(cmp_df)],
                     name="Итоговый прогноз",
                 )
             )
+            fig_cmp.add_trace(
+                go.Scatter(
+                    x=cmp_df["Сценарий"],
+                    y=cmp_df["Δ %"],
+                    mode="lines+markers",
+                    yaxis="y2",
+                    line=dict(color="#ff7f0e", width=2),
+                    name="Δ %",
+                )
+            )
             fig_cmp.update_layout(
-                title="Сравнение итогового прогноза по сценариям",
+                title="Сравнение сценариев: уровень и относительное изменение",
                 xaxis_title="Сценарий",
                 yaxis_title=f"Прогноз {asset_label}",
+                yaxis2=dict(title="Δ %", overlaying="y", side="right"),
                 template="plotly_white",
             )
             st.plotly_chart(fig_cmp, use_container_width=True)
