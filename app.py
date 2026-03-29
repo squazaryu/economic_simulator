@@ -1374,13 +1374,13 @@ def main() -> None:
         r1, r2 = st.columns([1, 2])
         if r1.button("Сбросить таймлайн под текущие параметры", key=f"reset_{timeline_seed_key}"):
             st.session_state[timeline_seed_key] = _timeline_seed_frame(controls, horizon_months)
-        r2.caption("Можно редактировать макропараметры для каждого месяца отдельно.")
+        r2.caption("Можно редактировать макропараметры и добавлять/удалять строки горизонта.")
 
         timeline_df = st.data_editor(
             st.session_state[timeline_seed_key],
             hide_index=True,
             use_container_width=True,
-            num_rows="fixed",
+            num_rows="dynamic",
             disabled=["date"],
             column_config={
                 "date": st.column_config.DateColumn("Дата"),
@@ -1395,9 +1395,12 @@ def main() -> None:
 
         try:
             tl = timeline_df.copy()
-            tl["date"] = pd.to_datetime(tl["date"], errors="coerce")
-            if tl["date"].isna().any():
-                tl["date"] = _timeline_seed_frame(controls, horizon_months)["date"]
+            timeline_rows = len(tl)
+            tl["date"] = pd.date_range(
+                start=pd.Timestamp.today().normalize() + pd.offsets.MonthEnd(1),
+                periods=timeline_rows,
+                freq="ME",
+            )
             for factor in ("oil", "key_rate", "usd_rub", "inflation"):
                 cfg = BASE_SLIDER_CONFIG[factor]
                 tl[factor] = pd.to_numeric(tl[factor], errors="coerce").fillna(float(controls[factor])).clip(cfg["min"], cfg["max"])
