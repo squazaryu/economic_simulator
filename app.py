@@ -61,7 +61,7 @@ FACTOR_LABELS = {
     "imoex_close": "IMOEX",
 }
 
-POPULAR_TICKERS = ["LKOH", "ROSN", "TATN", "SBER", "GAZP", "NVTK", "GMKN", "MOEX", "VTBR"]
+POPULAR_TICKERS = ["LKOH", "ROSN", "TATN", "SBER", "GAZP", "NVTK", "GMKN", "MOEX", "VTBR", "T", "YDEX"]
 
 
 def _clamp(value: float, config: dict[str, float]) -> float:
