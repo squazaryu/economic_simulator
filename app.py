@@ -1206,6 +1206,15 @@ def main() -> None:
         portfolio_weights,
     ) = _render_sidebar_controls(defaults)
 
+    cpu_saver = st.sidebar.toggle(
+        "Экономный режим CPU",
+        value=True,
+        help="Уменьшает размер тяжёлых расчётов (веер, Monte Carlo, Sobol) для более плавной работы UI.",
+    )
+    effective_n_paths = min(int(n_paths), 200) if cpu_saver else int(n_paths)
+    if cpu_saver and effective_n_paths < int(n_paths):
+        st.sidebar.caption(f"Для веерного прогноза используется {effective_n_paths} траекторий вместо {n_paths}.")
+
     adjustments = _adjustments_from_controls(controls)
     sim_context_key = _simulation_context_key(
         asset_type=asset_type,
@@ -1393,7 +1402,12 @@ def main() -> None:
 
         st.markdown("**Динамический прогноз будущей траектории**")
         try:
-            macro_paths = _simulate_macro_paths(controls, horizon_months=horizon_months, n_paths=n_paths, df=df)
+            macro_paths = _simulate_macro_paths(
+                controls,
+                horizon_months=horizon_months,
+                n_paths=effective_n_paths,
+                df=df,
+            )
             forecast_paths = _predict_paths(
                 asset_type=asset_type,
                 ticker=ticker,
@@ -1406,8 +1420,9 @@ def main() -> None:
             st.plotly_chart(
                 _trajectory_figure(current, forecast_paths, horizon_months=horizon_months, asset_label=asset_label),
                 use_container_width=True,
-                key=f"fan_{asset_type}_{ticker or 'imoex'}_{regime}_{horizon_months}_{n_paths}",
+                key=f"fan_{asset_type}_{ticker or 'imoex'}_{regime}_{horizon_months}_{effective_n_paths}",
             )
+            st.caption(f"Размер веера: {effective_n_paths} траекторий.")
         except Exception as exc:
             st.warning(f"Не удалось построить траектории прогноза: {exc}")
 
@@ -1625,6 +1640,7 @@ def main() -> None:
             progress = st.progress(0, text="Подготовка симуляции...")
             progress.progress(15, text="Загрузка параметров...")
             try:
+                mc_runs = 5000 if cpu_saver else 10000
                 result = run_monte_carlo(
                     {
                         "oil": controls["oil"],
@@ -1632,7 +1648,7 @@ def main() -> None:
                         "usd_rub": controls["usd_rub"],
                         "inflation": controls["inflation"],
                     },
-                    n_simulations=10000,
+                    n_simulations=mc_runs,
                     asset_type=asset_type,
                     ticker=ticker,
                     adjustments=adjustments,
@@ -1660,7 +1676,8 @@ def main() -> None:
                 f"Актив: {mc_result['asset_label']} | "
                 f"Корректировка: {mc_result['adjustment_pct']:+.2f}% | "
                 f"Масштаб волатильности: {controls['uncertainty_scale']:.1f}x | "
-                f"Режим: {regime}"
+                f"Режим: {regime} | "
+                f"Симуляций: {5000 if cpu_saver else 10000}"
             )
 
     with tabs[3]:
@@ -1677,8 +1694,9 @@ def main() -> None:
         if st.button("Рассчитать чувствительность Sobol", key="run_sobol"):
             with st.spinner("Выполняю анализ чувствительности..."):
                 try:
+                    sobol_samples = 256 if cpu_saver else 512
                     sobol_result = run_sobol_sensitivity(
-                        n_samples=512,
+                        n_samples=sobol_samples,
                         asset_type=asset_type,
                         ticker=ticker,
                         regime=regime,
@@ -1700,6 +1718,7 @@ def main() -> None:
                 "Дополнительные сценарные поправки (сентимент/ликвидность/геополитика/регуляторика) "
                 "не входят в Sobol-разложение, так как применяются пост-коррекцией к прогнозу."
             )
+            st.caption(f"Объем выборки Sobol: {256 if cpu_saver else 512}")
 
 
 if __name__ == "__main__":
