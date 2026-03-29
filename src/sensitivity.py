@@ -1,4 +1,4 @@
-"""Глобальный анализ чувствительности Sobol для IMOEX и акций MOEX."""
+"""Глобальный анализ чувствительности Sobol для IMOEX, акций MOEX и портфеля."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 from SALib.analyze import sobol
 from SALib.sample import saltelli
 
+from src.data_loader import load_moex_stock
 from src.model import load_model_artifact, load_stock_model_artifact
 from src.preprocessing import load_processed_dataset
 
@@ -26,6 +27,26 @@ PARAM_DISPLAY = {
     "usd_rub": "USD/RUB",
     "inflation": "Инфляция",
 }
+
+
+def _normalize_weights(tickers: list[str], weights: list[float] | None = None) -> dict[str, float]:
+    symbols = [t.upper().strip() for t in tickers if t and t.strip()]
+    if not symbols:
+        raise ValueError("Пустой список тикеров портфеля")
+
+    if weights is None:
+        arr = np.array([1.0 / len(symbols)] * len(symbols), dtype=float)
+    else:
+        if len(weights) != len(symbols):
+            raise ValueError("Число весов должно совпадать с числом тикеров")
+        arr = np.array(weights, dtype=float)
+        if np.any(arr < 0):
+            raise ValueError("Вес не может быть отрицательным")
+        if np.isclose(arr.sum(), 0):
+            raise ValueError("Сумма весов равна нулю")
+        arr = arr / arr.sum()
+
+    return {s: float(w) for s, w in zip(symbols, arr)}
 
 
 def _build_problem_definition() -> dict[str, Any]:
@@ -50,8 +71,8 @@ def _build_problem_definition() -> dict[str, Any]:
     }
 
 
-def _predict_chain(sampled: pd.DataFrame, asset_type: str, ticker: str | None) -> np.ndarray:
-    imoex_artifact = load_model_artifact()
+def _predict_imoex_chain(sampled: pd.DataFrame, regime: str = "all") -> np.ndarray:
+    imoex_artifact = load_model_artifact(regime=regime)
     imoex_model = imoex_artifact["model"]
     imoex_features: list[str] = imoex_artifact["feature_columns"]
 
@@ -63,15 +84,13 @@ def _predict_chain(sampled: pd.DataFrame, asset_type: str, ticker: str | None) -
             "inflation": sampled["inflation"],
         }
     )[imoex_features]
-    imoex_pred = imoex_model.predict(imoex_X)
+    return imoex_model.predict(imoex_X)
 
-    if asset_type != "stock":
-        return imoex_pred
 
-    if not ticker:
-        raise ValueError("Для анализа акции нужен ticker")
+def _predict_stock_chain(sampled: pd.DataFrame, ticker: str, regime: str = "all") -> np.ndarray:
+    imoex_pred = _predict_imoex_chain(sampled, regime=regime)
 
-    stock_artifact = load_stock_model_artifact(ticker)
+    stock_artifact = load_stock_model_artifact(ticker, regime=regime)
     stock_model = stock_artifact["model"]
     stock_features: list[str] = stock_artifact["feature_columns"]
 
@@ -87,30 +106,56 @@ def _predict_chain(sampled: pd.DataFrame, asset_type: str, ticker: str | None) -
     return stock_model.predict(stock_X)
 
 
-def _impact_sign_map(asset_type: str, ticker: str | None) -> dict[str, int]:
-    imoex_artifact = load_model_artifact()
-    imoex_coef = dict(zip(imoex_artifact["feature_columns"], imoex_artifact["model"].coef_))
+def _predict_portfolio_chain(
+    sampled: pd.DataFrame,
+    portfolio_tickers: list[str],
+    portfolio_weights: list[float] | None,
+    regime: str = "all",
+) -> np.ndarray:
+    weight_map = _normalize_weights(portfolio_tickers, portfolio_weights)
+    portfolio_return = np.zeros(len(sampled), dtype=float)
 
-    if asset_type != "stock":
-        return {
-            param: 1 if float(imoex_coef.get(PARAM_TO_FEATURE[param], 0.0)) >= 0 else -1
-            for param in PARAM_TO_FEATURE
-        }
+    for symbol, w in weight_map.items():
+        pred = _predict_stock_chain(sampled, symbol, regime=regime)
+        current = float(load_moex_stock(symbol)[f"{symbol.lower()}_close"].dropna().iloc[-1])
+        ret = pred / current - 1.0
+        portfolio_return += w * ret
 
-    if not ticker:
-        raise ValueError("Для анализа акции нужен ticker")
+    return 100.0 * (1.0 + portfolio_return)
 
-    stock_artifact = load_stock_model_artifact(ticker)
-    stock_coef = dict(zip(stock_artifact["feature_columns"], stock_artifact["model"].coef_))
 
-    sign_map: dict[str, int] = {}
-    beta_imoex_stock = float(stock_coef.get("imoex_close", 0.0))
-    for param, feature in PARAM_TO_FEATURE.items():
-        direct = float(stock_coef.get(feature, 0.0))
-        indirect = beta_imoex_stock * float(imoex_coef.get(feature, 0.0))
-        total = direct + indirect
-        sign_map[param] = 1 if total >= 0 else -1
-    return sign_map
+def _predict_chain(
+    sampled: pd.DataFrame,
+    asset_type: str,
+    ticker: str | None,
+    regime: str = "all",
+    portfolio_tickers: list[str] | None = None,
+    portfolio_weights: list[float] | None = None,
+) -> np.ndarray:
+    if asset_type == "stock":
+        if not ticker:
+            raise ValueError("Для анализа акции нужен ticker")
+        return _predict_stock_chain(sampled, ticker, regime=regime)
+
+    if asset_type == "portfolio":
+        return _predict_portfolio_chain(
+            sampled,
+            portfolio_tickers=portfolio_tickers or [],
+            portfolio_weights=portfolio_weights,
+            regime=regime,
+        )
+
+    return _predict_imoex_chain(sampled, regime=regime)
+
+
+def _impact_sign_map_from_samples(sampled: pd.DataFrame, y_pred: np.ndarray) -> dict[str, int]:
+    signs: dict[str, int] = {}
+    for param in PARAM_TO_FEATURE:
+        x = sampled[param].to_numpy(dtype=float)
+        corr = np.corrcoef(x, y_pred)[0, 1]
+        corr = 0.0 if np.isnan(corr) else float(corr)
+        signs[param] = 1 if corr >= 0 else -1
+    return signs
 
 
 def build_tornado_chart(sobol_df: pd.DataFrame, asset_label: str) -> go.Figure:
@@ -139,8 +184,11 @@ def run_sobol_sensitivity(
     n_samples: int = 512,
     asset_type: str = "imoex",
     ticker: str | None = None,
+    regime: str = "all",
+    portfolio_tickers: list[str] | None = None,
+    portfolio_weights: list[float] | None = None,
 ) -> dict[str, Any]:
-    """Выполнить Sobol-анализ для IMOEX или выбранной акции."""
+    """Выполнить Sobol-анализ для IMOEX, акции или портфеля."""
     if n_samples < 128:
         raise ValueError("n_samples должен быть >= 128 для устойчивой оценки")
 
@@ -148,10 +196,17 @@ def run_sobol_sensitivity(
     sample_matrix = saltelli.sample(problem, n_samples, calc_second_order=False)
 
     sampled = pd.DataFrame(sample_matrix, columns=problem["names"])
-    y_pred = _predict_chain(sampled, asset_type=asset_type, ticker=ticker)
+    y_pred = _predict_chain(
+        sampled,
+        asset_type=asset_type,
+        ticker=ticker,
+        regime=regime,
+        portfolio_tickers=portfolio_tickers,
+        portfolio_weights=portfolio_weights,
+    )
 
     analysis = sobol.analyze(problem, y_pred, calc_second_order=False, print_to_console=False)
-    sign_map = _impact_sign_map(asset_type=asset_type, ticker=ticker)
+    sign_map = _impact_sign_map_from_samples(sampled, y_pred)
 
     factor_rows = []
     for param_name, s1 in zip(problem["names"], analysis["S1"]):
@@ -167,7 +222,15 @@ def run_sobol_sensitivity(
         )
 
     sobol_df = pd.DataFrame(factor_rows).sort_values("S1", ascending=False).reset_index(drop=True)
-    asset_label = f"акции {ticker.upper()}" if asset_type == "stock" and ticker else "IMOEX"
+
+    if asset_type == "stock" and ticker:
+        asset_label = f"акции {ticker.upper()}"
+    elif asset_type == "portfolio":
+        short_names = ", ".join((portfolio_tickers or [])[:4])
+        asset_label = f"портфеля ({short_names})"
+    else:
+        asset_label = "IMOEX"
+
     fig = build_tornado_chart(sobol_df, asset_label=asset_label)
 
     top_factor = sobol_df.iloc[0]["factor_label"]
@@ -184,6 +247,6 @@ def run_sobol_sensitivity(
 
 
 if __name__ == "__main__":
-    result = run_sobol_sensitivity(n_samples=512)
+    result = run_sobol_sensitivity(n_samples=256)
     print(result["sobol_df"])
     print(f"Главный фактор: {result['top_factor']} (S1={result['top_s1']:.3f})")

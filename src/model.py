@@ -1,4 +1,4 @@
-"""Линейные модели прогноза IMOEX и отдельных акций MOEX."""
+"""Линейные модели прогноза IMOEX, акций MOEX и портфельной аналитики."""
 
 from __future__ import annotations
 
@@ -27,6 +27,9 @@ STOCK_FEATURE_COLUMNS = ["key_rate", "usd_rub", "brent_usd", "inflation", "imoex
 TARGET_CLOSE = "imoex_close"
 TARGET_RET = "imoex_pct_change"
 
+REGIME_CUTOFF = pd.Timestamp("2022-02-01")
+REGIME_OPTIONS = {"all", "pre_2022", "post_2022"}
+
 
 @dataclass(frozen=True)
 class ModelMetrics:
@@ -35,13 +38,39 @@ class ModelMetrics:
     rmse: float
 
 
+def _validate_regime(regime: str) -> str:
+    regime_norm = (regime or "all").strip().lower()
+    if regime_norm not in REGIME_OPTIONS:
+        raise ValueError(f"Неизвестный режим: {regime}. Допустимо: {sorted(REGIME_OPTIONS)}")
+    return regime_norm
+
+
+def _regime_suffix(regime: str) -> str:
+    regime_norm = _validate_regime(regime)
+    return "" if regime_norm == "all" else f"_{regime_norm}"
+
+
+def _apply_regime_filter(frame: pd.DataFrame, regime: str) -> pd.DataFrame:
+    regime_norm = _validate_regime(regime)
+    if regime_norm == "all":
+        return frame
+
+    out = frame.copy()
+    out["date"] = pd.to_datetime(out["date"])
+    if regime_norm == "pre_2022":
+        out = out[out["date"] < REGIME_CUTOFF]
+    else:  # post_2022
+        out = out[out["date"] >= REGIME_CUTOFF]
+    return out
+
+
 def _build_train_test_split(
     X: pd.DataFrame,
     y: pd.Series,
     test_size: float = 0.2,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-    if len(X) < 12:
-        raise ValueError("Недостаточно наблюдений для обучения. Минимум 12 строк.")
+    if len(X) < 8:
+        raise ValueError("Недостаточно наблюдений для обучения. Минимум 8 строк.")
 
     split_idx = max(int(len(X) * (1 - test_size)), 1)
     X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
@@ -59,6 +88,7 @@ def _fit_and_pack(
     target_column: str,
     save_path: Path,
     model_name: str,
+    regime: str,
 ) -> dict[str, Any]:
     X = frame[feature_columns]
     y = frame[target_column]
@@ -75,6 +105,9 @@ def _fit_and_pack(
         rmse=float(np.sqrt(mean_squared_error(y_test, predictions))),
     )
 
+    feature_means = {col: float(X[col].mean()) for col in feature_columns}
+    feature_stds = {col: float(X[col].std(ddof=1)) for col in feature_columns}
+
     artifact: dict[str, Any] = {
         "model": model,
         "model_name": model_name,
@@ -83,14 +116,19 @@ def _fit_and_pack(
         "metrics": metrics.__dict__,
         "train_rows": int(len(X_train)),
         "test_rows": int(len(X_test)),
-        "last_date": frame["date"].max(),
+        "last_date": pd.to_datetime(frame["date"]).max(),
+        "regime": _validate_regime(regime),
+        "feature_means": feature_means,
+        "feature_stds": feature_stds,
+        "intercept": float(model.intercept_),
+        "coefs": {col: float(coef) for col, coef in zip(feature_columns, model.coef_)},
     }
 
     joblib.dump(artifact, save_path)
     return artifact
 
 
-def _prepare_imoex_training_frame(use_returns_target: bool = False) -> tuple[pd.DataFrame, str]:
+def _prepare_imoex_training_frame(use_returns_target: bool = False, regime: str = "all") -> tuple[pd.DataFrame, str]:
     dataset = load_processed_dataset()
     target_col = TARGET_RET if use_returns_target else TARGET_CLOSE
 
@@ -100,35 +138,55 @@ def _prepare_imoex_training_frame(use_returns_target: bool = False) -> tuple[pd.
         raise ValueError(f"Отсутствуют колонки для обучения IMOEX: {missing_cols}")
 
     frame = dataset[["date", *required_cols]].dropna().sort_values("date")
+    frame = _apply_regime_filter(frame, regime)
+    if len(frame) < 8:
+        raise ValueError(f"Слишком мало данных в режиме {regime}: {len(frame)} строк")
     return frame, target_col
+
+
+def _imoex_model_path(regime: str = "all") -> Path:
+    regime_norm = _validate_regime(regime)
+    if regime_norm == "all":
+        return IMOEX_MODEL_PATH
+    return MODEL_DIR / f"regression_model{_regime_suffix(regime_norm)}.pkl"
 
 
 def train_regression_model(
     use_returns_target: bool = False,
-    save_path: Path = IMOEX_MODEL_PATH,
+    save_path: Path | None = None,
+    regime: str = "all",
 ) -> dict[str, Any]:
     """Обучить модель для прогноза IMOEX."""
-    frame, target_col = _prepare_imoex_training_frame(use_returns_target=use_returns_target)
+    regime_norm = _validate_regime(regime)
+    frame, target_col = _prepare_imoex_training_frame(use_returns_target=use_returns_target, regime=regime_norm)
+    out_path = save_path or _imoex_model_path(regime_norm)
     return _fit_and_pack(
         frame=frame,
         feature_columns=IMOEX_FEATURE_COLUMNS,
         target_column=target_col,
-        save_path=save_path,
+        save_path=out_path,
         model_name="IMOEX Linear Regression",
+        regime=regime_norm,
     )
 
 
-def load_model_artifact(path: Path = IMOEX_MODEL_PATH) -> dict[str, Any]:
-    if path.exists():
-        return joblib.load(path)
-    return train_regression_model(save_path=path)
+def load_model_artifact(path: Path | None = None, regime: str = "all") -> dict[str, Any]:
+    regime_norm = _validate_regime(regime)
+    model_path = path or _imoex_model_path(regime_norm)
+    if model_path.exists():
+        artifact = joblib.load(model_path)
+        artifact_regime = _validate_regime(str(artifact.get("regime", "all")))
+        if artifact_regime == regime_norm:
+            return artifact
+    return train_regression_model(save_path=model_path, regime=regime_norm)
 
 
-def _stock_model_path(ticker: str) -> Path:
-    return MODEL_DIR / f"stock_model_{ticker.lower()}.pkl"
+def _stock_model_path(ticker: str, regime: str = "all") -> Path:
+    symbol = ticker.upper().strip()
+    return MODEL_DIR / f"stock_model_{symbol.lower()}{_regime_suffix(regime)}.pkl"
 
 
-def _prepare_stock_training_frame(ticker: str) -> tuple[pd.DataFrame, str]:
+def _prepare_stock_training_frame(ticker: str, regime: str = "all") -> tuple[pd.DataFrame, str]:
     symbol = ticker.upper().strip()
     target_col = f"{symbol.lower()}_close"
 
@@ -137,21 +195,23 @@ def _prepare_stock_training_frame(ticker: str) -> tuple[pd.DataFrame, str]:
 
     frame = macro.merge(stock, on="date", how="inner")
     frame = frame.dropna().sort_values("date")
+    frame = _apply_regime_filter(frame, regime)
 
     if target_col not in frame.columns:
         raise ValueError(f"Не удалось получить ряд цены для тикера {symbol}")
 
-    if len(frame) < 12:
-        raise ValueError(f"Недостаточно истории для тикера {symbol}: {len(frame)} строк")
+    if len(frame) < 8:
+        raise ValueError(f"Недостаточно истории для тикера {symbol} в режиме {regime}: {len(frame)} строк")
 
     return frame, target_col
 
 
-def train_stock_model(ticker: str) -> dict[str, Any]:
+def train_stock_model(ticker: str, regime: str = "all") -> dict[str, Any]:
     """Обучить модель для выбранной акции MOEX."""
     symbol = ticker.upper().strip()
-    save_path = _stock_model_path(symbol)
-    frame, target_col = _prepare_stock_training_frame(symbol)
+    regime_norm = _validate_regime(regime)
+    save_path = _stock_model_path(symbol, regime=regime_norm)
+    frame, target_col = _prepare_stock_training_frame(symbol, regime=regime_norm)
 
     artifact = _fit_and_pack(
         frame=frame,
@@ -159,18 +219,23 @@ def train_stock_model(ticker: str) -> dict[str, Any]:
         target_column=target_col,
         save_path=save_path,
         model_name=f"{symbol} Linear Regression",
+        regime=regime_norm,
     )
     artifact["ticker"] = symbol
     joblib.dump(artifact, save_path)
     return artifact
 
 
-def load_stock_model_artifact(ticker: str) -> dict[str, Any]:
+def load_stock_model_artifact(ticker: str, regime: str = "all") -> dict[str, Any]:
     symbol = ticker.upper().strip()
-    path = _stock_model_path(symbol)
+    regime_norm = _validate_regime(regime)
+    path = _stock_model_path(symbol, regime=regime_norm)
     if path.exists():
-        return joblib.load(path)
-    return train_stock_model(symbol)
+        artifact = joblib.load(path)
+        artifact_regime = _validate_regime(str(artifact.get("regime", "all")))
+        if artifact_regime == regime_norm:
+            return artifact
+    return train_stock_model(symbol, regime=regime_norm)
 
 
 def apply_scenario_adjustments(
@@ -191,11 +256,12 @@ def predict_scenario(
     key_rate: float,
     usd_rub: float,
     inflation: float,
-    model_path: Path = IMOEX_MODEL_PATH,
+    model_path: Path | None = None,
     adjustments: dict[str, float] | None = None,
+    regime: str = "all",
 ) -> float:
     """Прогноз IMOEX по пользовательскому сценарию."""
-    artifact = load_model_artifact(path=model_path)
+    artifact = load_model_artifact(path=model_path, regime=regime)
     model: LinearRegression = artifact["model"]
     feature_columns: list[str] = artifact["feature_columns"]
 
@@ -219,10 +285,11 @@ def predict_stock_scenario(
     inflation: float,
     imoex_value: float | None = None,
     adjustments: dict[str, float] | None = None,
+    regime: str = "all",
 ) -> float:
     """Прогноз цены выбранной акции MOEX."""
     symbol = ticker.upper().strip()
-    artifact = load_stock_model_artifact(symbol)
+    artifact = load_stock_model_artifact(symbol, regime=regime)
     model: LinearRegression = artifact["model"]
     feature_columns: list[str] = artifact["feature_columns"]
 
@@ -231,6 +298,7 @@ def predict_stock_scenario(
         key_rate=key_rate,
         usd_rub=usd_rub,
         inflation=inflation,
+        regime=regime,
     )
 
     scenario_map = {
@@ -246,12 +314,71 @@ def predict_stock_scenario(
     return apply_scenario_adjustments(prediction, adjustments)
 
 
+def explain_imoex_drivers(
+    oil: float,
+    key_rate: float,
+    usd_rub: float,
+    inflation: float,
+    regime: str = "all",
+) -> pd.DataFrame:
+    artifact = load_model_artifact(regime=regime)
+    coefs = artifact["coefs"]
+    means = artifact["feature_means"]
+
+    feature_values = {
+        "brent_usd": float(oil),
+        "key_rate": float(key_rate),
+        "usd_rub": float(usd_rub),
+        "inflation": float(inflation),
+    }
+
+    rows = []
+    for feat, value in feature_values.items():
+        coef = float(coefs.get(feat, 0.0))
+        delta = float(value - float(means.get(feat, value)))
+        contribution = coef * delta
+        rows.append({"factor": feat, "coef": coef, "delta": delta, "contribution": contribution})
+
+    return pd.DataFrame(rows).sort_values("contribution", key=lambda s: s.abs(), ascending=False)
+
+
+def explain_stock_drivers(
+    ticker: str,
+    oil: float,
+    key_rate: float,
+    usd_rub: float,
+    inflation: float,
+    imoex_value: float,
+    regime: str = "all",
+) -> pd.DataFrame:
+    artifact = load_stock_model_artifact(ticker, regime=regime)
+    coefs = artifact["coefs"]
+    means = artifact["feature_means"]
+
+    feature_values = {
+        "brent_usd": float(oil),
+        "key_rate": float(key_rate),
+        "usd_rub": float(usd_rub),
+        "inflation": float(inflation),
+        "imoex_close": float(imoex_value),
+    }
+
+    rows = []
+    for feat, value in feature_values.items():
+        coef = float(coefs.get(feat, 0.0))
+        delta = float(value - float(means.get(feat, value)))
+        contribution = coef * delta
+        rows.append({"factor": feat, "coef": coef, "delta": delta, "contribution": contribution})
+
+    return pd.DataFrame(rows).sort_values("contribution", key=lambda s: s.abs(), ascending=False)
+
+
 if __name__ == "__main__":
-    imoex_artifact = train_regression_model()
+    imoex_artifact = train_regression_model(regime="all")
     print("IMOEX metrics:", imoex_artifact["metrics"])
 
-    demo_imoex = predict_scenario(oil=80.0, key_rate=12.0, usd_rub=95.0, inflation=7.0)
+    demo_imoex = predict_scenario(oil=80.0, key_rate=12.0, usd_rub=95.0, inflation=7.0, regime="post_2022")
     print("IMOEX scenario prediction:", round(demo_imoex, 2))
 
-    demo_stock = predict_stock_scenario("LKOH", oil=80.0, key_rate=12.0, usd_rub=95.0, inflation=7.0)
+    demo_stock = predict_stock_scenario("LKOH", oil=80.0, key_rate=12.0, usd_rub=95.0, inflation=7.0, regime="all")
     print("LKOH scenario prediction:", round(demo_stock, 2))

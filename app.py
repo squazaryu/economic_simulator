@@ -13,6 +13,8 @@ from plotly.subplots import make_subplots
 from src.data_loader import load_moex_stock
 from src.model import (
     apply_scenario_adjustments,
+    explain_imoex_drivers,
+    explain_stock_drivers,
     load_model_artifact,
     load_stock_model_artifact,
     predict_scenario,
@@ -42,7 +44,21 @@ ADDITIONAL_SLIDER_CONFIG = {
     "liquidity_effect": {"label": "Эффект ликвидности (%)", "min": -15.0, "max": 15.0, "step": 1.0},
     "geopolitics_effect": {"label": "Геополитический фактор (%)", "min": -25.0, "max": 25.0, "step": 1.0},
     "regulatory_effect": {"label": "Регуляторный фактор (%)", "min": -20.0, "max": 20.0, "step": 1.0},
-    "uncertainty_scale": {"label": "Масштаб волатильности (Monte Carlo)", "min": 0.5, "max": 2.0, "step": 0.1},
+    "uncertainty_scale": {"label": "Масштаб волатильности", "min": 0.5, "max": 2.0, "step": 0.1},
+}
+
+REGIME_LABELS = {
+    "Весь период (5 лет)": "all",
+    "До февраля 2022": "pre_2022",
+    "С февраля 2022": "post_2022",
+}
+
+FACTOR_LABELS = {
+    "brent_usd": "Нефть Brent",
+    "key_rate": "Ключевая ставка",
+    "usd_rub": "USD/RUB",
+    "inflation": "Инфляция",
+    "imoex_close": "IMOEX",
 }
 
 POPULAR_TICKERS = ["LKOH", "ROSN", "TATN", "SBER", "GAZP", "NVTK", "GMKN", "MOEX", "VTBR"]
@@ -50,6 +66,20 @@ POPULAR_TICKERS = ["LKOH", "ROSN", "TATN", "SBER", "GAZP", "NVTK", "GMKN", "MOEX
 
 def _clamp(value: float, config: dict[str, float]) -> float:
     return float(min(max(value, config["min"]), config["max"]))
+
+
+def _normalize_weights(weight_map: dict[str, float]) -> dict[str, float]:
+    items = [(k.upper().strip(), float(v)) for k, v in weight_map.items() if k and k.strip()]
+    if not items:
+        return {}
+    arr = np.array([v for _, v in items], dtype=float)
+    arr = np.clip(arr, 0.0, None)
+    total = float(arr.sum())
+    if np.isclose(total, 0):
+        arr = np.array([1.0 / len(items)] * len(items), dtype=float)
+    else:
+        arr = arr / total
+    return {ticker: float(w) for (ticker, _), w in zip(items, arr)}
 
 
 @st.cache_data(show_spinner=False)
@@ -63,13 +93,13 @@ def get_stock_data(ticker: str) -> pd.DataFrame:
 
 
 @st.cache_resource(show_spinner=False)
-def get_imoex_model() -> dict[str, Any]:
-    return load_model_artifact()
+def get_imoex_model(regime: str) -> dict[str, Any]:
+    return load_model_artifact(regime=regime)
 
 
 @st.cache_resource(show_spinner=False)
-def get_stock_model(ticker: str) -> dict[str, Any]:
-    return load_stock_model_artifact(ticker)
+def get_stock_model(ticker: str, regime: str) -> dict[str, Any]:
+    return load_stock_model_artifact(ticker, regime=regime)
 
 
 def _defaults_from_data(df: pd.DataFrame) -> dict[str, float]:
@@ -118,23 +148,79 @@ def _preset_values(defaults: dict[str, float]) -> dict[str, dict[str, float]]:
 def _apply_preset(preset_name: str, defaults: dict[str, float]) -> None:
     selected = _preset_values(defaults)[preset_name]
     for key, value in selected.items():
-        config = BASE_SLIDER_CONFIG.get(key) or ADDITIONAL_SLIDER_CONFIG.get(key)
-        st.session_state[key] = _clamp(float(value), config) if config else float(value)
+        cfg = BASE_SLIDER_CONFIG.get(key) or ADDITIONAL_SLIDER_CONFIG.get(key)
+        st.session_state[key] = _clamp(float(value), cfg) if cfg else float(value)
 
 
-def _render_sidebar_controls(defaults: dict[str, float]) -> tuple[dict[str, float], str, str | None]:
+def _get_portfolio_controls() -> tuple[list[str], dict[str, float]]:
+    picked = st.sidebar.multiselect(
+        "Тикеры портфеля (2-5)",
+        POPULAR_TICKERS,
+        default=["LKOH", "ROSN", "TATN"],
+    )
+
+    selected = [p.upper().strip() for p in picked][:5]
+    if len(selected) < 2:
+        st.sidebar.warning("Для портфеля выберите минимум 2 тикера.")
+
+    raw_weights: dict[str, float] = {}
+    if selected:
+        st.sidebar.markdown("**Веса портфеля (%)**")
+        default_share = 100.0 / len(selected)
+        for t in selected:
+            key = f"weight_{t}"
+            if key not in st.session_state:
+                st.session_state[key] = default_share
+            raw_weights[t] = st.sidebar.slider(
+                f"Вес {t}",
+                min_value=0.0,
+                max_value=100.0,
+                step=1.0,
+                value=float(st.session_state[key]),
+                key=key,
+            )
+
+    normalized = _normalize_weights(raw_weights)
+    if normalized:
+        st.sidebar.caption(
+            "Нормализованные веса: "
+            + ", ".join(f"{t} {w*100:.1f}%" for t, w in normalized.items())
+        )
+
+    return selected, normalized
+
+
+def _render_sidebar_controls(
+    defaults: dict[str, float],
+) -> tuple[dict[str, float], str, str | None, str, int, int, list[str], dict[str, float]]:
     st.sidebar.header("Параметры сценария")
 
     if "oil" not in st.session_state:
         for key, value in defaults.items():
             st.session_state[key] = value
 
-    asset_choice = st.sidebar.radio("Целевой актив", ["IMOEX", "Акция MOEX"], horizontal=False)
+    asset_choice = st.sidebar.radio(
+        "Целевой актив",
+        ["IMOEX", "Акция MOEX", "Портфель MOEX"],
+        horizontal=False,
+    )
+
+    regime_label = st.sidebar.selectbox("Режим модели", list(REGIME_LABELS.keys()), index=0)
+    regime = REGIME_LABELS[regime_label]
+
+    horizon_months = st.sidebar.slider("Горизонт прогноза (месяцев)", min_value=6, max_value=12, step=1, value=9)
+    n_paths = st.sidebar.slider("Число траекторий (веер)", min_value=100, max_value=800, step=50, value=300)
+
     ticker: str | None = None
+    portfolio_tickers: list[str] = []
+    portfolio_weights: dict[str, float] = {}
+
     if asset_choice == "Акция MOEX":
         selected = st.sidebar.selectbox("Популярный тикер", POPULAR_TICKERS, index=0)
         custom = st.sidebar.text_input("Или введите тикер вручную", value=selected)
         ticker = (custom or selected).upper().strip()
+    elif asset_choice == "Портфель MOEX":
+        portfolio_tickers, portfolio_weights = _get_portfolio_controls()
 
     b1, b2, b3 = st.sidebar.columns(3)
     if b1.button("Базовый", use_container_width=True):
@@ -167,7 +253,16 @@ def _render_sidebar_controls(defaults: dict[str, float]) -> tuple[dict[str, floa
             key=key,
         )
 
-    return controls, ("stock" if asset_choice == "Акция MOEX" else "imoex"), ticker
+    return (
+        controls,
+        "stock" if asset_choice == "Акция MOEX" else ("portfolio" if asset_choice == "Портфель MOEX" else "imoex"),
+        ticker,
+        regime,
+        horizon_months,
+        n_paths,
+        portfolio_tickers,
+        portfolio_weights,
+    )
 
 
 def _adjustments_from_controls(controls: dict[str, float]) -> dict[str, float]:
@@ -179,16 +274,63 @@ def _adjustments_from_controls(controls: dict[str, float]) -> dict[str, float]:
     }
 
 
-def _build_plot_df(df: pd.DataFrame, ticker: str | None) -> pd.DataFrame:
+def _portfolio_series(tickers: list[str], weights: dict[str, float]) -> pd.DataFrame:
+    if len(tickers) < 2:
+        return pd.DataFrame(columns=["date", "portfolio_index"])
+
+    frames: list[pd.DataFrame] = []
+    for symbol in tickers:
+        col = f"{symbol.lower()}_close"
+        s_df = get_stock_data(symbol)[["date", col]].copy()
+        frames.append(s_df)
+
+    merged = frames[0]
+    for fr in frames[1:]:
+        merged = merged.merge(fr, on="date", how="inner")
+
+    merged = merged.sort_values("date").dropna()
+    if merged.empty:
+        return pd.DataFrame(columns=["date", "portfolio_index"])
+
+    for symbol in tickers:
+        col = f"{symbol.lower()}_close"
+        base = float(merged[col].iloc[0])
+        merged[f"{symbol.lower()}_idx"] = merged[col] / base * 100.0
+
+    merged["portfolio_index"] = 0.0
+    for symbol in tickers:
+        merged["portfolio_index"] += merged[f"{symbol.lower()}_idx"] * float(weights.get(symbol, 0.0))
+
+    return merged[["date", "portfolio_index"]]
+
+
+def _build_plot_df(
+    df: pd.DataFrame,
+    asset_type: str,
+    ticker: str | None,
+    portfolio_tickers: list[str],
+    portfolio_weights: dict[str, float],
+) -> pd.DataFrame:
     plot_df = df.copy()
-    if ticker:
+
+    if asset_type == "stock" and ticker:
         stock_df = get_stock_data(ticker)
         stock_col = f"{ticker.lower()}_close"
         plot_df = plot_df.merge(stock_df[["date", stock_col]], on="date", how="left")
+
+    if asset_type == "portfolio":
+        pf = _portfolio_series(portfolio_tickers, portfolio_weights)
+        if not pf.empty:
+            plot_df = plot_df.merge(pf, on="date", how="left")
+
     return plot_df
 
 
-def _historical_chart(df: pd.DataFrame, ticker: str | None) -> go.Figure:
+def _historical_chart(
+    df: pd.DataFrame,
+    asset_type: str,
+    ticker: str | None,
+) -> go.Figure:
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
     fig.add_trace(
@@ -196,18 +338,24 @@ def _historical_chart(df: pd.DataFrame, ticker: str | None) -> go.Figure:
         secondary_y=False,
     )
 
-    if ticker:
+    if asset_type == "stock" and ticker:
         stock_col = f"{ticker.lower()}_close"
         if stock_col in df.columns:
             fig.add_trace(
-                go.Scatter(
-                    x=df["date"],
-                    y=df[stock_col],
-                    name=f"{ticker.upper()}",
-                    line=dict(width=2, color="#ff7f0e"),
-                ),
+                go.Scatter(x=df["date"], y=df[stock_col], name=ticker.upper(), line=dict(width=2, color="#ff7f0e")),
                 secondary_y=False,
             )
+
+    if asset_type == "portfolio" and "portfolio_index" in df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=df["date"],
+                y=df["portfolio_index"],
+                name="Портфель (индекс=100)",
+                line=dict(width=2, color="#8c564b"),
+            ),
+            secondary_y=False,
+        )
 
     fig.add_trace(
         go.Scatter(x=df["date"], y=df["usd_rub"], name="USD/RUB", line=dict(width=2, color="#d62728")),
@@ -232,12 +380,16 @@ def _historical_chart(df: pd.DataFrame, ticker: str | None) -> go.Figure:
     return fig
 
 
-def _correlation_heatmap(df: pd.DataFrame, ticker: str | None) -> go.Figure:
+def _correlation_heatmap(df: pd.DataFrame, asset_type: str, ticker: str | None) -> go.Figure:
     cols = ["imoex_close", "key_rate", "usd_rub", "brent_usd", "inflation"]
-    if ticker:
+
+    if asset_type == "stock" and ticker:
         stock_col = f"{ticker.lower()}_close"
         if stock_col in df.columns:
             cols.insert(0, stock_col)
+
+    if asset_type == "portfolio" and "portfolio_index" in df.columns:
+        cols.insert(0, "portfolio_index")
 
     corr = df[cols].corr()
     fig = go.Figure(
@@ -257,12 +409,16 @@ def _correlation_heatmap(df: pd.DataFrame, ticker: str | None) -> go.Figure:
     return fig
 
 
-def _correlation_insights(df: pd.DataFrame, ticker: str | None) -> list[str]:
+def _correlation_insights(df: pd.DataFrame, asset_type: str, ticker: str | None) -> list[str]:
     cols = ["imoex_close", "key_rate", "usd_rub", "brent_usd", "inflation"]
-    if ticker:
+
+    if asset_type == "stock" and ticker:
         stock_col = f"{ticker.lower()}_close"
         if stock_col in df.columns:
             cols.insert(0, stock_col)
+
+    if asset_type == "portfolio" and "portfolio_index" in df.columns:
+        cols.insert(0, "portfolio_index")
 
     corr = df[cols].corr()
     pairs: list[tuple[str, str, float]] = []
@@ -283,6 +439,7 @@ def _correlation_insights(df: pd.DataFrame, ticker: str | None) -> list[str]:
         "usd_rub": "USD/RUB",
         "brent_usd": "Brent",
         "inflation": "Инфляция",
+        "portfolio_index": "Портфель",
     }
     if ticker:
         label_map[f"{ticker.lower()}_close"] = ticker.upper()
@@ -299,7 +456,6 @@ def _correlation_insights(df: pd.DataFrame, ticker: str | None) -> list[str]:
 
 
 def _scenario_stress_index(controls: dict[str, float], adjustments: dict[str, float]) -> float:
-    # Нормируем базовые факторы к диапазону [0, 1], где 0 — спокойный, 1 — стрессовый.
     stress_components = [
         abs(controls["key_rate"] - 10.0) / 20.0,
         abs(controls["usd_rub"] - 85.0) / 65.0,
@@ -313,6 +469,23 @@ def _scenario_stress_index(controls: dict[str, float], adjustments: dict[str, fl
     ]
     raw = float(np.mean([min(max(x, 0.0), 1.0) for x in stress_components]))
     return min(max(raw * 100.0, 0.0), 100.0)
+
+
+def _adjustment_multiplier(adjustments: dict[str, float]) -> float:
+    return 1.0 + float(sum(adjustments.values())) / 100.0
+
+
+def _linear_predict(artifact: dict[str, Any], features: dict[str, np.ndarray | float]) -> np.ndarray:
+    coefs = artifact["coefs"]
+    intercept = float(artifact["intercept"])
+
+    first_key = next(iter(features))
+    first_val = np.asarray(features[first_key], dtype=float)
+    out = np.full(first_val.shape, intercept, dtype=float)
+
+    for feature in artifact["feature_columns"]:
+        out += float(coefs.get(feature, 0.0)) * np.asarray(features[feature], dtype=float)
+    return out
 
 
 def _gauge_chart(prediction: float, current: float, asset_label: str) -> go.Figure:
@@ -345,17 +518,45 @@ def _gauge_chart(prediction: float, current: float, asset_label: str) -> go.Figu
     return fig
 
 
-def _predict_asset(
+def _current_asset_value(
+    df: pd.DataFrame,
+    asset_type: str,
+    ticker: str | None,
+    portfolio_tickers: list[str],
+    portfolio_weights: dict[str, float],
+) -> float:
+    if asset_type == "stock":
+        if not ticker:
+            raise ValueError("Не указан тикер акции")
+        s_df = get_stock_data(ticker)
+        return float(s_df[f"{ticker.lower()}_close"].dropna().iloc[-1])
+
+    if asset_type == "portfolio":
+        if len(portfolio_tickers) < 2:
+            return 100.0
+        pf = _portfolio_series(portfolio_tickers, portfolio_weights)
+        if pf.empty:
+            return 100.0
+        return float(pf["portfolio_index"].dropna().iloc[-1])
+
+    return float(df["imoex_close"].dropna().iloc[-1])
+
+
+def _predict_asset_snapshot(
     asset_type: str,
     ticker: str | None,
     controls: dict[str, float],
     adjustments: dict[str, float],
-) -> tuple[float, float, str, dict[str, Any]]:
+    regime: str,
+    portfolio_tickers: list[str],
+    portfolio_weights: dict[str, float],
+) -> tuple[float, float, str, dict[str, Any] | None, dict[str, float]]:
     base_imoex = predict_scenario(
         oil=controls["oil"],
         key_rate=controls["key_rate"],
         usd_rub=controls["usd_rub"],
         inflation=controls["inflation"],
+        regime=regime,
     )
 
     if asset_type == "stock":
@@ -369,24 +570,329 @@ def _predict_asset(
             inflation=controls["inflation"],
             imoex_value=base_imoex,
             adjustments=None,
+            regime=regime,
         )
         adjusted_prediction = apply_scenario_adjustments(raw_prediction, adjustments)
-        stock_model = get_stock_model(ticker)
-        return adjusted_prediction, raw_prediction, ticker.upper(), stock_model
+        return adjusted_prediction, raw_prediction, ticker.upper(), get_stock_model(ticker, regime), {}
+
+    if asset_type == "portfolio":
+        if len(portfolio_tickers) < 2:
+            raise ValueError("Для портфеля выберите минимум 2 тикера")
+
+        weights = portfolio_weights or _normalize_weights({t: 1.0 for t in portfolio_tickers})
+        stock_pred_map: dict[str, float] = {}
+        weighted_return = 0.0
+        for symbol in portfolio_tickers:
+            current = float(get_stock_data(symbol)[f"{symbol.lower()}_close"].dropna().iloc[-1])
+            pred = predict_stock_scenario(
+                ticker=symbol,
+                oil=controls["oil"],
+                key_rate=controls["key_rate"],
+                usd_rub=controls["usd_rub"],
+                inflation=controls["inflation"],
+                imoex_value=base_imoex,
+                adjustments=None,
+                regime=regime,
+            )
+            stock_pred_map[symbol] = pred
+            weighted_return += float(weights.get(symbol, 0.0)) * (pred / current - 1.0)
+
+        raw_prediction = 100.0 * (1.0 + weighted_return)
+        adjusted_prediction = apply_scenario_adjustments(raw_prediction, adjustments)
+        return adjusted_prediction, raw_prediction, "Портфель (индекс=100)", None, stock_pred_map
 
     raw_prediction = base_imoex
     adjusted_prediction = apply_scenario_adjustments(raw_prediction, adjustments)
-    return adjusted_prediction, raw_prediction, "IMOEX", get_imoex_model()
+    return adjusted_prediction, raw_prediction, "IMOEX", get_imoex_model(regime), {}
 
 
-def _current_asset_value(df: pd.DataFrame, asset_type: str, ticker: str | None) -> float:
+def _driver_comment(
+    asset_type: str,
+    ticker: str | None,
+    controls: dict[str, float],
+    adjustments: dict[str, float],
+    regime: str,
+    raw_imoex: float,
+    stock_pred_map: dict[str, float],
+    portfolio_tickers: list[str],
+) -> str:
+    total_adj = float(sum(adjustments.values()))
+
+    if asset_type == "imoex":
+        drivers = explain_imoex_drivers(
+            oil=controls["oil"],
+            key_rate=controls["key_rate"],
+            usd_rub=controls["usd_rub"],
+            inflation=controls["inflation"],
+            regime=regime,
+        )
+    elif asset_type == "stock" and ticker:
+        drivers = explain_stock_drivers(
+            ticker=ticker,
+            oil=controls["oil"],
+            key_rate=controls["key_rate"],
+            usd_rub=controls["usd_rub"],
+            inflation=controls["inflation"],
+            imoex_value=raw_imoex,
+            regime=regime,
+        )
+    else:
+        # Для портфеля берем драйверы через канал IMOEX + лидеров по акциям.
+        drivers = explain_imoex_drivers(
+            oil=controls["oil"],
+            key_rate=controls["key_rate"],
+            usd_rub=controls["usd_rub"],
+            inflation=controls["inflation"],
+            regime=regime,
+        )
+
+    positives = drivers[drivers["contribution"] > 0]
+    negatives = drivers[drivers["contribution"] < 0]
+
+    pos_line = ""
+    neg_line = ""
+    if not positives.empty:
+        row = positives.iloc[0]
+        pos_line = f"Позитивный драйвер: {FACTOR_LABELS.get(row['factor'], row['factor'])} ({row['contribution']:+.1f})"
+    if not negatives.empty:
+        row = negatives.iloc[0]
+        neg_line = f"Негативный драйвер: {FACTOR_LABELS.get(row['factor'], row['factor'])} ({row['contribution']:+.1f})"
+
+    addon = f"Сумма доп. поправок сценария: {total_adj:+.2f}%"
+
+    if asset_type == "portfolio" and stock_pred_map:
+        leader = max(stock_pred_map.items(), key=lambda x: x[1])[0]
+        laggard = min(stock_pred_map.items(), key=lambda x: x[1])[0]
+        pf_note = f"Лидер портфеля по прогнозу: {leader}. Самый слабый вклад: {laggard}."
+        return " | ".join([x for x in [pos_line, neg_line, addon, pf_note] if x])
+
+    return " | ".join([x for x in [pos_line, neg_line, addon] if x])
+
+
+def _simulate_macro_paths(
+    controls: dict[str, float],
+    horizon_months: int,
+    n_paths: int,
+    df: pd.DataFrame,
+) -> dict[str, np.ndarray]:
+    means = {
+        "oil": float(df["brent_usd"].mean()),
+        "key_rate": float(df["key_rate"].mean()),
+        "usd_rub": float(df["usd_rub"].mean()),
+        "inflation": float(df["inflation"].mean()),
+    }
+    stds = {
+        "oil": float(df["brent_usd"].std(ddof=1)),
+        "key_rate": float(df["key_rate"].std(ddof=1)),
+        "usd_rub": float(df["usd_rub"].std(ddof=1)),
+        "inflation": float(df["inflation"].std(ddof=1)),
+    }
+
+    scale = float(controls["uncertainty_scale"])
+    alpha = 0.25
+    shock_scale = 0.35
+
+    rng = np.random.default_rng(42)
+    paths = {k: np.zeros((n_paths, horizon_months), dtype=float) for k in ["oil", "key_rate", "usd_rub", "inflation"]}
+
+    for key in paths:
+        paths[key][:, 0] = float(controls[key])
+
+    for t in range(1, horizon_months):
+        for key in paths:
+            prev = paths[key][:, t - 1]
+            mu = means[key]
+            sigma = max(stds[key], 1e-6) * scale * shock_scale
+            noise = rng.normal(0.0, sigma, size=n_paths)
+            nxt = prev + alpha * (mu - prev) + noise
+
+            cfg = BASE_SLIDER_CONFIG[key]
+            nxt = np.clip(nxt, cfg["min"], cfg["max"])
+            paths[key][:, t] = nxt
+
+    return paths
+
+
+def _predict_paths(
+    asset_type: str,
+    ticker: str | None,
+    paths: dict[str, np.ndarray],
+    adjustments: dict[str, float],
+    regime: str,
+    portfolio_tickers: list[str],
+    portfolio_weights: dict[str, float],
+) -> np.ndarray:
+    oil = paths["oil"]
+    key_rate = paths["key_rate"]
+    usd = paths["usd_rub"]
+    infl = paths["inflation"]
+
+    n_paths, horizon = oil.shape
+    mult = _adjustment_multiplier(adjustments)
+
+    imoex_artifact = get_imoex_model(regime)
+    imoex_raw = _linear_predict(
+        imoex_artifact,
+        {
+            "key_rate": key_rate,
+            "usd_rub": usd,
+            "brent_usd": oil,
+            "inflation": infl,
+        },
+    )
+
+    if asset_type == "imoex":
+        return imoex_raw * mult
+
     if asset_type == "stock":
         if not ticker:
             raise ValueError("Не указан тикер акции")
-        stock_col = f"{ticker.lower()}_close"
-        stock_df = get_stock_data(ticker)
-        return float(stock_df[stock_col].dropna().iloc[-1])
-    return float(df["imoex_close"].dropna().iloc[-1])
+        stock_artifact = get_stock_model(ticker, regime)
+        stock_raw = _linear_predict(
+            stock_artifact,
+            {
+                "key_rate": key_rate,
+                "usd_rub": usd,
+                "brent_usd": oil,
+                "inflation": infl,
+                "imoex_close": imoex_raw,
+            },
+        )
+        return stock_raw * mult
+
+    if len(portfolio_tickers) < 2:
+        raise ValueError("Для портфеля выберите минимум 2 тикера")
+
+    weights = portfolio_weights or _normalize_weights({t: 1.0 for t in portfolio_tickers})
+    portfolio_ret = np.zeros((n_paths, horizon), dtype=float)
+    for symbol in portfolio_tickers:
+        stock_artifact = get_stock_model(symbol, regime)
+        stock_raw = _linear_predict(
+            stock_artifact,
+            {
+                "key_rate": key_rate,
+                "usd_rub": usd,
+                "brent_usd": oil,
+                "inflation": infl,
+                "imoex_close": imoex_raw,
+            },
+        )
+        current = float(get_stock_data(symbol)[f"{symbol.lower()}_close"].dropna().iloc[-1])
+        stock_ret = stock_raw / current - 1.0
+        portfolio_ret += float(weights.get(symbol, 0.0)) * stock_ret
+
+    return 100.0 * (1.0 + portfolio_ret) * mult
+
+
+def _trajectory_figure(
+    current_value: float,
+    forecast_paths: np.ndarray,
+    horizon_months: int,
+    asset_label: str,
+) -> go.Figure:
+    p10 = np.percentile(forecast_paths, 10, axis=0)
+    p50 = np.percentile(forecast_paths, 50, axis=0)
+    p90 = np.percentile(forecast_paths, 90, axis=0)
+
+    future_dates = pd.date_range(start=pd.Timestamp.today().normalize() + pd.offsets.MonthEnd(0), periods=horizon_months + 1, freq="ME")
+
+    median_line = np.concatenate([[current_value], p50])
+    low_line = np.concatenate([[current_value], p10])
+    high_line = np.concatenate([[current_value], p90])
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=future_dates,
+            y=high_line,
+            mode="lines",
+            line=dict(width=0),
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=future_dates,
+            y=low_line,
+            mode="lines",
+            fill="tonexty",
+            fillcolor="rgba(31, 119, 180, 0.2)",
+            line=dict(width=0),
+            name="Диапазон P10-P90",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=future_dates,
+            y=median_line,
+            mode="lines+markers",
+            name="Медианный прогноз",
+            line=dict(width=3, color="#1f77b4"),
+        )
+    )
+
+    fig.update_layout(
+        title=f"Динамический прогноз {asset_label} на {horizon_months} мес.",
+        xaxis_title="Дата",
+        yaxis_title=f"Значение {asset_label}",
+        template="plotly_white",
+    )
+    return fig
+
+
+def _scenario_comparison(
+    defaults: dict[str, float],
+    asset_type: str,
+    ticker: str | None,
+    regime: str,
+    current: float,
+    portfolio_tickers: list[str],
+    portfolio_weights: dict[str, float],
+) -> pd.DataFrame:
+    presets = _preset_values(defaults)
+    rows: list[dict[str, Any]] = []
+
+    for key, cfg in [("base", "Базовый"), ("optimistic", "Оптимистичный"), ("pessimistic", "Пессимистичный")]:
+        sc = presets[key]
+        controls_sc = {
+            "oil": sc["oil"],
+            "key_rate": sc["key_rate"],
+            "usd_rub": sc["usd_rub"],
+            "inflation": sc["inflation"],
+            "uncertainty_scale": sc["uncertainty_scale"],
+        }
+        adjustments_sc = {
+            "market_sentiment": sc["market_sentiment"],
+            "liquidity_effect": sc["liquidity_effect"],
+            "geopolitics_effect": sc["geopolitics_effect"],
+            "regulatory_effect": sc["regulatory_effect"],
+        }
+
+        pred, raw, _, _, _ = _predict_asset_snapshot(
+            asset_type=asset_type,
+            ticker=ticker,
+            controls=controls_sc,
+            adjustments=adjustments_sc,
+            regime=regime,
+            portfolio_tickers=portfolio_tickers,
+            portfolio_weights=portfolio_weights,
+        )
+
+        stress = _scenario_stress_index({**controls_sc, **adjustments_sc}, adjustments_sc)
+
+        rows.append(
+            {
+                "Сценарий": cfg,
+                "Базовый прогноз": round(raw, 2),
+                "Итоговый прогноз": round(pred, 2),
+                "Δ к текущему": round(pred - current, 2),
+                "Δ %": round((pred / current - 1.0) * 100.0 if current else 0.0, 2),
+                "Индекс стресса": round(stress, 1),
+            }
+        )
+
+    return pd.DataFrame(rows)
 
 
 def main() -> None:
@@ -399,10 +905,19 @@ def main() -> None:
         st.stop()
 
     defaults = _defaults_from_data(df)
-    controls, asset_type, ticker = _render_sidebar_controls(defaults)
-    adjustments = _adjustments_from_controls(controls)
+    (
+        controls,
+        asset_type,
+        ticker,
+        regime,
+        horizon_months,
+        n_paths,
+        portfolio_tickers,
+        portfolio_weights,
+    ) = _render_sidebar_controls(defaults)
 
-    plot_df = _build_plot_df(df, ticker=ticker if asset_type == "stock" else None)
+    adjustments = _adjustments_from_controls(controls)
+    plot_df = _build_plot_df(df, asset_type, ticker, portfolio_tickers, portfolio_weights)
 
     tabs = st.tabs([
         "📊 Исторические данные",
@@ -415,13 +930,13 @@ def main() -> None:
         st.markdown(
             """
             **Описание вкладки**
-            Здесь показана историческая динамика IMOEX, макрофакторов и (при выборе) отдельной акции.
-            График помогает увидеть синхронность/расхождение трендов, а корреляционная матрица — силу линейной связи между факторами.
-            Используйте эту вкладку для проверки, насколько выбранная акция чувствительна к нефти, ставке и валютному курсу.
+            Здесь показана историческая динамика IMOEX, макрофакторов и выбранного актива (акция/портфель).
+            График помогает увидеть тренды, а корреляционная матрица — силу линейной связи между факторами.
             """
         )
-        st.plotly_chart(_historical_chart(plot_df, ticker if asset_type == "stock" else None), use_container_width=True)
-        st.plotly_chart(_correlation_heatmap(plot_df, ticker if asset_type == "stock" else None), use_container_width=True)
+        st.plotly_chart(_historical_chart(plot_df, asset_type, ticker), use_container_width=True)
+        st.plotly_chart(_correlation_heatmap(plot_df, asset_type, ticker), use_container_width=True)
+
         with st.expander("Как читать корреляционную матрицу"):
             st.markdown(
                 """
@@ -429,10 +944,11 @@ def main() -> None:
                 - Ближе к `+1`: факторы чаще движутся в одном направлении.
                 - Ближе к `-1`: факторы чаще движутся в противоположных направлениях.
                 - Ближе к `0`: явной линейной связи почти нет.
-                - Корреляция не доказывает причинность: это статистическая связь, а не причинно-следственный вывод.
+                - Корреляция не доказывает причинность.
                 """
             )
-        insights = _correlation_insights(plot_df, ticker if asset_type == "stock" else None)
+
+        insights = _correlation_insights(plot_df, asset_type, ticker)
         if insights:
             st.markdown("**Автоинсайты по корреляциям (топ-3):**")
             for line in insights:
@@ -442,20 +958,29 @@ def main() -> None:
         st.markdown(
             """
             **Описание вкладки**
-            Сценарный анализ строит прогноз на основе введенных макропараметров.
-            Сначала считается базовый прогноз модели (только исторические факторы), затем применяются дополнительные поправки сценария:
-            рыночный сентимент, ликвидность, геополитика и регуляторный фактор.
-            Итог показывает ожидаемое значение актива и отклонение от текущего уровня.
+            Прогноз рассчитывается по выбранному режиму модели (`весь период`, `до 2022`, `после 2022`).
+            Сначала формируется базовый прогноз по макропараметрам, затем применяются дополнительные поправки сценария.
+            Ниже показан веерный прогноз на 6-12 месяцев, чтобы оценить возможную динамику, а не только одну точку.
             """
         )
+
         try:
-            prediction, raw_prediction, asset_label, model_artifact = _predict_asset(
+            prediction, raw_prediction, asset_label, model_artifact, stock_pred_map = _predict_asset_snapshot(
                 asset_type=asset_type,
                 ticker=ticker,
                 controls=controls,
                 adjustments=adjustments,
+                regime=regime,
+                portfolio_tickers=portfolio_tickers,
+                portfolio_weights=portfolio_weights,
             )
-            current = _current_asset_value(df, asset_type=asset_type, ticker=ticker)
+            current = _current_asset_value(
+                df,
+                asset_type=asset_type,
+                ticker=ticker,
+                portfolio_tickers=portfolio_tickers,
+                portfolio_weights=portfolio_weights,
+            )
         except Exception as exc:
             st.error(f"Ошибка сценарного прогноза: {exc}")
             st.stop()
@@ -482,24 +1007,95 @@ def main() -> None:
 
         st.plotly_chart(_gauge_chart(prediction, current, asset_label=asset_label), use_container_width=True)
 
-        total_adj = sum(adjustments.values())
-        st.caption(
-            "Суммарная корректировка сценария: "
-            f"{total_adj:+.2f}% | "
-            f"R²={model_artifact['metrics']['r2']:.3f}, "
-            f"MAE={model_artifact['metrics']['mae']:.2f}, "
-            f"RMSE={model_artifact['metrics']['rmse']:.2f}"
+        raw_imoex = predict_scenario(
+            oil=controls["oil"],
+            key_rate=controls["key_rate"],
+            usd_rub=controls["usd_rub"],
+            inflation=controls["inflation"],
+            regime=regime,
         )
+        comment = _driver_comment(
+            asset_type=asset_type,
+            ticker=ticker,
+            controls=controls,
+            adjustments=adjustments,
+            regime=regime,
+            raw_imoex=raw_imoex,
+            stock_pred_map=stock_pred_map,
+            portfolio_tickers=portfolio_tickers,
+        )
+        st.info(f"**Что двигает результат:** {comment}")
+
+        if model_artifact is not None:
+            st.caption(
+                f"Метрики модели ({regime}): "
+                f"R²={model_artifact['metrics']['r2']:.3f}, "
+                f"MAE={model_artifact['metrics']['mae']:.2f}, "
+                f"RMSE={model_artifact['metrics']['rmse']:.2f}"
+            )
+        else:
+            st.caption("Для портфеля используется агрегирование прогнозов по акциям и весам.")
+
+        st.markdown("**Динамический прогноз будущей траектории**")
+        try:
+            macro_paths = _simulate_macro_paths(controls, horizon_months=horizon_months, n_paths=n_paths, df=df)
+            forecast_paths = _predict_paths(
+                asset_type=asset_type,
+                ticker=ticker,
+                paths=macro_paths,
+                adjustments=adjustments,
+                regime=regime,
+                portfolio_tickers=portfolio_tickers,
+                portfolio_weights=portfolio_weights,
+            )
+            st.plotly_chart(
+                _trajectory_figure(current, forecast_paths, horizon_months=horizon_months, asset_label=asset_label),
+                use_container_width=True,
+            )
+        except Exception as exc:
+            st.warning(f"Не удалось построить траектории прогноза: {exc}")
+
+        st.markdown("**Сравнение сценариев (side-by-side)**")
+        try:
+            cmp_df = _scenario_comparison(
+                defaults=defaults,
+                asset_type=asset_type,
+                ticker=ticker,
+                regime=regime,
+                current=current,
+                portfolio_tickers=portfolio_tickers,
+                portfolio_weights=portfolio_weights,
+            )
+            st.dataframe(cmp_df, use_container_width=True, hide_index=True)
+
+            fig_cmp = go.Figure()
+            fig_cmp.add_trace(
+                go.Bar(
+                    x=cmp_df["Сценарий"],
+                    y=cmp_df["Итоговый прогноз"],
+                    marker_color=["#1f77b4", "#2ca02c", "#d62728"],
+                    name="Итоговый прогноз",
+                )
+            )
+            fig_cmp.update_layout(
+                title="Сравнение итогового прогноза по сценариям",
+                xaxis_title="Сценарий",
+                yaxis_title=f"Прогноз {asset_label}",
+                template="plotly_white",
+            )
+            st.plotly_chart(fig_cmp, use_container_width=True)
+        except Exception as exc:
+            st.warning(f"Не удалось построить сравнение сценариев: {exc}")
 
     with tabs[2]:
         st.markdown(
             """
             **Описание вкладки**
-            Monte Carlo генерирует 10 000 случайных сценариев вокруг ваших базовых параметров.
-            Для каждого фактора используется нормальное распределение с историческим стандартным отклонением.
-            По результату выводятся квантили P5/P50/P95 и вероятность падения актива более чем на 20% от текущего значения.
+            Monte Carlo генерирует 10 000 случайных сценариев вокруг введенных параметров.
+            Выводятся квантили P5/P50/P95, стандартное отклонение и вероятность падения более чем на 20%.
             """
         )
+
         if st.button("Запустить симуляцию Монте-Карло", key="run_mc"):
             progress = st.progress(0, text="Подготовка симуляции...")
             progress.progress(15, text="Загрузка параметров...")
@@ -516,6 +1112,9 @@ def main() -> None:
                     ticker=ticker,
                     adjustments=adjustments,
                     uncertainty_scale=controls["uncertainty_scale"],
+                    regime=regime,
+                    portfolio_tickers=portfolio_tickers,
+                    portfolio_weights=[portfolio_weights[t] for t in portfolio_tickers] if portfolio_weights else None,
                 )
                 st.session_state["mc_result"] = result
                 progress.progress(100, text="Готово")
@@ -534,8 +1133,9 @@ def main() -> None:
 
             st.caption(
                 f"Актив: {mc_result['asset_label']} | "
-                f"Суммарная корректировка: {mc_result['adjustment_pct']:+.2f}% | "
-                f"Масштаб волатильности: {controls['uncertainty_scale']:.1f}x"
+                f"Корректировка: {mc_result['adjustment_pct']:+.2f}% | "
+                f"Масштаб волатильности: {controls['uncertainty_scale']:.1f}x | "
+                f"Режим: {regime}"
             )
 
     with tabs[3]:
@@ -543,10 +1143,10 @@ def main() -> None:
             """
             **Описание вкладки**
             Sobol-анализ измеряет вклад каждого макрофактора в разброс прогноза.
-            Индекс S1 (первого порядка) показывает, насколько сильно фактор влияет сам по себе.
-            Чем выше S1, тем важнее фактор в модели; цвет столбца отражает знак влияния (зеленый — позитивный, красный — негативный).
+            Индекс S1 показывает индивидуальный вклад фактора: чем выше S1, тем сильнее влияние.
             """
         )
+
         if st.button("Рассчитать чувствительность Sobol", key="run_sobol"):
             with st.spinner("Выполняю анализ чувствительности..."):
                 try:
@@ -554,6 +1154,9 @@ def main() -> None:
                         n_samples=512,
                         asset_type=asset_type,
                         ticker=ticker,
+                        regime=regime,
+                        portfolio_tickers=portfolio_tickers,
+                        portfolio_weights=[portfolio_weights[t] for t in portfolio_tickers] if portfolio_weights else None,
                     )
                     st.session_state["sobol_result"] = sobol_result
                 except Exception as exc:
@@ -567,8 +1170,8 @@ def main() -> None:
                 f"`{sobol_result['top_factor']}` (S1={sobol_result['top_s1']:.2f})"
             )
             st.caption(
-                "Важно: дополнительные сценарные поправки (сентимент/ликвидность/геополитика/регуляторика) "
-                "являются пост-коррекцией прогноза и не участвуют в Sobol-разложении."
+                "Дополнительные сценарные поправки (сентимент/ликвидность/геополитика/регуляторика) "
+                "не входят в Sobol-разложение, так как применяются пост-коррекцией к прогнозу."
             )
 
 
