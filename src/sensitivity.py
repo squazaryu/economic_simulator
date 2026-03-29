@@ -246,6 +246,7 @@ def run_sobol_sensitivity(
         "asset_label": asset_label,
         "n_samples": int(n_samples),
         "n_evaluations": int(len(sampled)),
+        "y_variance": float(np.var(y_pred, ddof=1)),
     }
 
 

@@ -1246,6 +1246,12 @@ def _selected_point_index(points: list[dict[str, Any]]) -> int | None:
     if not points:
         return None
     point = points[0]
+    custom = point.get("customdata")
+    if isinstance(custom, (list, tuple)) and custom:
+        try:
+            return int(custom[0])
+        except Exception:
+            pass
     for key in ("point_index", "pointNumber", "point_number", "pointIndex"):
         raw = point.get(key)
         if raw is None:
@@ -1288,6 +1294,8 @@ def _render_monte_carlo_bin_details(mc_result: dict[str, Any], selection: Any, d
     )
     selected_idx = labels.index(selected_label)
     row = bins.iloc[selected_idx]
+    selected_range = f"{float(row['left']):.1f} .. {float(row['right']):.1f}"
+    st.success(f"Выбран столбец Monte Carlo: #{selected_idx + 1} ({selected_range})")
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Диапазон", f"{float(row['left']):.1f} .. {float(row['right']):.1f}")
@@ -1331,6 +1339,29 @@ def _render_monte_carlo_bin_details(mc_result: dict[str, Any], selection: Any, d
         f"usd_rub={float(std_map.get('usd_rub', np.nan)):.2f}, "
         f"inflation={float(std_map.get('inflation', np.nan)):.2f}"
     )
+
+    total_adj = float(mc_result.get("adjustment_pct", 0.0))
+    adj_mult = 1.0 + total_adj / 100.0
+    logic_df = pd.DataFrame(
+        [
+            {"Шаг": 1, "Логика": "Генерация сценариев", "Формула": "X ~ N(μ, σ)", "Подстановка": "μ и σ указаны ниже"},
+            {"Шаг": 2, "Логика": "Базовый прогноз", "Формула": "Y_raw = model(X)", "Подстановка": "Модель IMOEX/акции/портфеля"},
+            {
+                "Шаг": 3,
+                "Логика": "Сценарная корректировка",
+                "Формула": "Y = Y_raw * (1 + adj/100)",
+                "Подстановка": f"adj={total_adj:+.2f}% => множитель {adj_mult:.4f}",
+            },
+            {
+                "Шаг": 4,
+                "Логика": "Агрегация по столбцу",
+                "Формула": "P(bin)=count/N",
+                "Подстановка": f"{int(row['count'])}/{int(mc_result.get('n_simulations', 0))} = {float(row['probability']):.2%}",
+            },
+        ]
+    )
+    st.markdown("**Логика расчета (пошагово)**")
+    st.dataframe(logic_df, use_container_width=True, hide_index=True)
 
 
 def _ensure_mc_detail_payload(mc_result: dict[str, Any], controls: dict[str, float]) -> dict[str, Any]:
@@ -1409,6 +1440,7 @@ def _render_sobol_factor_details(sobol_result: dict[str, Any], selection: Any, d
     selected_label = st.selectbox("Фактор", labels, key=select_key)
     selected_idx = labels.index(selected_label)
     row = sobol_df.iloc[selected_idx]
+    st.success(f"Выбран фактор Sobol: {selected_label}")
 
     factor = str(row["factor"])
     bounds_map = {
@@ -1419,6 +1451,8 @@ def _render_sobol_factor_details(sobol_result: dict[str, Any], selection: Any, d
     sign_text = "позитивное" if int(row.get("impact_sign", 1)) > 0 else "негативное"
     s1 = float(row["S1"])
     s1_conf = float(row.get("S1_conf", np.nan))
+    y_var = float(sobol_result.get("y_variance", np.nan))
+    explained_var = s1 * y_var if np.isfinite(y_var) else float("nan")
 
     d = len(problem.get("names", []))
     n_samples = int(sobol_result.get("n_samples", 0))
@@ -1440,6 +1474,21 @@ def _render_sobol_factor_details(sobol_result: dict[str, Any], selection: Any, d
         - В этом запуске: `D={d}` факторов, `N={n_samples}` базовых сэмплов, фактических прогонов модели: **{n_evaluations}**.
         """
     )
+    logic_df = pd.DataFrame(
+        [
+            {"Шаг": 1, "Логика": "Генерация Saltelli", "Формула": "N_eval = N * (D + 2)", "Подстановка": f"N={n_samples}, D={d}, N_eval={n_evaluations}"},
+            {"Шаг": 2, "Логика": "Прогоны модели", "Формула": "Y = f(X)", "Подстановка": f"Вариация выхода Var(Y)={y_var:.3f}" if np.isfinite(y_var) else "Var(Y)=н/д"},
+            {
+                "Шаг": 3,
+                "Логика": "Доля объясненной вариации",
+                "Формула": "Var(E[Y|Xi]) ≈ S1 * Var(Y)",
+                "Подстановка": f"{s1:.3f} * {y_var:.3f} = {explained_var:.3f}" if np.isfinite(explained_var) else "н/д",
+            },
+            {"Шаг": 4, "Логика": "Надежность оценки", "Формула": "S1 ± S1_conf", "Подстановка": f"{s1:.3f} ± {s1_conf:.3f}"},
+        ]
+    )
+    st.markdown("**Логика расчета (пошагово)**")
+    st.dataframe(logic_df, use_container_width=True, hide_index=True)
 
 
 def main() -> None:
