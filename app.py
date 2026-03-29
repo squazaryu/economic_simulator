@@ -1113,6 +1113,34 @@ def _scenario_comparison_from_editor(
     return pd.DataFrame(rows)
 
 
+def _simulation_context_key(
+    asset_type: str,
+    ticker: str | None,
+    regime: str,
+    controls: dict[str, float],
+    adjustments: dict[str, float],
+    portfolio_tickers: list[str],
+    portfolio_weights: dict[str, float],
+) -> tuple[Any, ...]:
+    weights = tuple(round(float(portfolio_weights.get(t, 0.0)), 6) for t in portfolio_tickers)
+    return (
+        asset_type,
+        ticker or "",
+        regime,
+        tuple(portfolio_tickers),
+        weights,
+        round(float(controls["oil"]), 6),
+        round(float(controls["key_rate"]), 6),
+        round(float(controls["usd_rub"]), 6),
+        round(float(controls["inflation"]), 6),
+        round(float(controls["uncertainty_scale"]), 6),
+        round(float(adjustments["market_sentiment"]), 6),
+        round(float(adjustments["liquidity_effect"]), 6),
+        round(float(adjustments["geopolitics_effect"]), 6),
+        round(float(adjustments["regulatory_effect"]), 6),
+    )
+
+
 def main() -> None:
     st.title("Симулятор экономических сценариев для рынка РФ")
 
@@ -1135,6 +1163,21 @@ def main() -> None:
     ) = _render_sidebar_controls(defaults)
 
     adjustments = _adjustments_from_controls(controls)
+    sim_context_key = _simulation_context_key(
+        asset_type=asset_type,
+        ticker=ticker,
+        regime=regime,
+        controls=controls,
+        adjustments=adjustments,
+        portfolio_tickers=portfolio_tickers,
+        portfolio_weights=portfolio_weights,
+    )
+    context_changed = st.session_state.get("sim_context_key") != sim_context_key
+    if context_changed:
+        st.session_state["sim_context_key"] = sim_context_key
+        st.session_state.pop("mc_result", None)
+        st.session_state.pop("sobol_result", None)
+
     plot_df = _build_plot_df(df, asset_type, ticker, portfolio_tickers, portfolio_weights)
 
     tabs = st.tabs([
@@ -1386,7 +1429,7 @@ def main() -> None:
             st.warning(f"Не удалось рассчитать ручной таймлайн: {exc}")
 
         st.markdown("**Интерактивное сравнение 2-3 сценариев**")
-        scenario_count = st.radio("Количество сценариев", [2, 3], horizontal=True, key="scenario_count_compare")
+        st.caption("Можно добавлять/удалять строки сценариев прямо в таблице.")
         compare_seed_key = f"compare_seed_{asset_type}_{ticker or 'imoex'}_{regime}"
         if compare_seed_key not in st.session_state:
             st.session_state[compare_seed_key] = _scenario_comparison_seed(defaults, controls)
@@ -1395,10 +1438,10 @@ def main() -> None:
             st.session_state[compare_seed_key] = _scenario_comparison_seed(defaults, controls)
 
         editor_df = st.data_editor(
-            st.session_state[compare_seed_key].head(int(scenario_count)).copy(),
+            st.session_state[compare_seed_key].copy(),
             hide_index=True,
             use_container_width=True,
-            num_rows="fixed",
+            num_rows="dynamic",
             column_config={
                 "Сценарий": st.column_config.TextColumn("Сценарий"),
                 "Нефть": st.column_config.NumberColumn("Нефть", min_value=BASE_SLIDER_CONFIG["oil"]["min"], max_value=BASE_SLIDER_CONFIG["oil"]["max"], step=BASE_SLIDER_CONFIG["oil"]["step"]),
@@ -1411,50 +1454,58 @@ def main() -> None:
                 "Регуляторика": st.column_config.NumberColumn("Регуляторика", min_value=ADDITIONAL_SLIDER_CONFIG["regulatory_effect"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["regulatory_effect"]["max"], step=ADDITIONAL_SLIDER_CONFIG["regulatory_effect"]["step"]),
                 "Волатильность": st.column_config.NumberColumn("Волатильность", min_value=ADDITIONAL_SLIDER_CONFIG["uncertainty_scale"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["uncertainty_scale"]["max"], step=ADDITIONAL_SLIDER_CONFIG["uncertainty_scale"]["step"]),
             },
-            key=f"editor_{compare_seed_key}_{scenario_count}",
+            key=f"editor_{compare_seed_key}",
         )
+        st.session_state[compare_seed_key] = editor_df
 
-        try:
-            cmp_df = _scenario_comparison_from_editor(
-                scenarios_df=editor_df,
-                asset_type=asset_type,
-                ticker=ticker,
-                regime=regime,
-                current=current,
-                portfolio_tickers=portfolio_tickers,
-                portfolio_weights=portfolio_weights,
-            )
-            st.dataframe(cmp_df, use_container_width=True, hide_index=True)
+        if len(editor_df) < 2:
+            st.info("Добавьте минимум 2 строки сценариев для сравнения.")
+        else:
+            try:
+                if len(editor_df) > 8:
+                    st.warning("Для производительности используются первые 8 строк таблицы.")
+                    editor_df = editor_df.head(8)
 
-            fig_cmp = go.Figure()
-            fig_cmp.add_trace(
-                go.Bar(
-                    x=cmp_df["Сценарий"],
-                    y=cmp_df["Итоговый прогноз"],
-                    marker_color=["#1f77b4", "#2ca02c", "#d62728"][: len(cmp_df)],
-                    name="Итоговый прогноз",
+                cmp_df = _scenario_comparison_from_editor(
+                    scenarios_df=editor_df,
+                    asset_type=asset_type,
+                    ticker=ticker,
+                    regime=regime,
+                    current=current,
+                    portfolio_tickers=portfolio_tickers,
+                    portfolio_weights=portfolio_weights,
                 )
-            )
-            fig_cmp.add_trace(
-                go.Scatter(
-                    x=cmp_df["Сценарий"],
-                    y=cmp_df["Δ %"],
-                    mode="lines+markers",
-                    yaxis="y2",
-                    line=dict(color="#ff7f0e", width=2),
-                    name="Δ %",
+                st.dataframe(cmp_df, use_container_width=True, hide_index=True)
+
+                fig_cmp = go.Figure()
+                fig_cmp.add_trace(
+                    go.Bar(
+                        x=cmp_df["Сценарий"],
+                        y=cmp_df["Итоговый прогноз"],
+                        marker_color=["#1f77b4", "#2ca02c", "#d62728"][: len(cmp_df)],
+                        name="Итоговый прогноз",
+                    )
                 )
-            )
-            fig_cmp.update_layout(
-                title="Сравнение сценариев: уровень и относительное изменение",
-                xaxis_title="Сценарий",
-                yaxis_title=f"Прогноз {asset_label}",
-                yaxis2=dict(title="Δ %", overlaying="y", side="right"),
-                template="plotly_white",
-            )
-            st.plotly_chart(fig_cmp, use_container_width=True)
-        except Exception as exc:
-            st.warning(f"Не удалось построить сравнение сценариев: {exc}")
+                fig_cmp.add_trace(
+                    go.Scatter(
+                        x=cmp_df["Сценарий"],
+                        y=cmp_df["Δ %"],
+                        mode="lines+markers",
+                        yaxis="y2",
+                        line=dict(color="#ff7f0e", width=2),
+                        name="Δ %",
+                    )
+                )
+                fig_cmp.update_layout(
+                    title="Сравнение сценариев: уровень и относительное изменение",
+                    xaxis_title="Сценарий",
+                    yaxis_title=f"Прогноз {asset_label}",
+                    yaxis2=dict(title="Δ %", overlaying="y", side="right"),
+                    template="plotly_white",
+                )
+                st.plotly_chart(fig_cmp, use_container_width=True)
+            except Exception as exc:
+                st.warning(f"Не удалось построить сравнение сценариев: {exc}")
 
     with tabs[2]:
         st.markdown(
@@ -1464,6 +1515,8 @@ def main() -> None:
             Выводятся квантили P5/P50/P95, стандартное отклонение и вероятность падения более чем на 20%.
             """
         )
+        if context_changed:
+            st.info("Параметры изменились. Пересчитайте Monte Carlo для нового сценария.")
 
         if st.button("Запустить симуляцию Монте-Карло", key="run_mc"):
             progress = st.progress(0, text="Подготовка симуляции...")
@@ -1515,6 +1568,8 @@ def main() -> None:
             Индекс S1 показывает индивидуальный вклад фактора: чем выше S1, тем сильнее влияние.
             """
         )
+        if context_changed:
+            st.info("Параметры изменились. Пересчитайте Sobol-анализ для нового сценария.")
 
         if st.button("Рассчитать чувствительность Sobol", key="run_sobol"):
             with st.spinner("Выполняю анализ чувствительности..."):
