@@ -209,13 +209,14 @@ def run_sobol_sensitivity(
     sign_map = _impact_sign_map_from_samples(sampled, y_pred)
 
     factor_rows = []
-    for param_name, s1 in zip(problem["names"], analysis["S1"]):
+    for param_name, s1, s1_conf in zip(problem["names"], analysis["S1"], analysis["S1_conf"]):
         sign = sign_map[param_name]
         factor_rows.append(
             {
                 "factor": param_name,
                 "factor_label": PARAM_DISPLAY[param_name],
                 "S1": float(np.nan_to_num(s1, nan=0.0)),
+                "S1_conf": float(np.nan_to_num(s1_conf, nan=0.0)),
                 "impact_sign": sign,
                 "color": "#31a354" if sign > 0 else "#de2d26",
             }
@@ -243,6 +244,8 @@ def run_sobol_sensitivity(
         "figure": fig,
         "problem": problem,
         "asset_label": asset_label,
+        "n_samples": int(n_samples),
+        "n_evaluations": int(len(sampled)),
     }
 
 

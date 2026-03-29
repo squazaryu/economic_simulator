@@ -1181,6 +1181,193 @@ def _resize_compare_editor_source(
     return out[expected_cols]
 
 
+def _plotly_selected_points(selection: Any) -> list[dict[str, Any]]:
+    if selection is None:
+        return []
+
+    candidates: list[Any] = []
+    if isinstance(selection, dict):
+        candidates.append(selection)
+    else:
+        sel_attr = getattr(selection, "selection", None)
+        if sel_attr is not None:
+            candidates.append(sel_attr)
+
+        to_dict = getattr(selection, "to_dict", None)
+        if callable(to_dict):
+            try:
+                candidates.append(to_dict())
+            except Exception:
+                pass
+
+        try:
+            candidates.append(dict(selection))
+        except Exception:
+            pass
+
+    for candidate in candidates:
+        if hasattr(candidate, "to_dict"):
+            try:
+                candidate = candidate.to_dict()
+            except Exception:
+                continue
+
+        if isinstance(candidate, dict):
+            points = candidate.get("points", [])
+            if isinstance(points, list):
+                return [p for p in points if isinstance(p, dict)]
+
+    return []
+
+
+def _selected_point_index(points: list[dict[str, Any]]) -> int | None:
+    if not points:
+        return None
+    point = points[0]
+    for key in ("point_index", "pointNumber", "point_number", "pointIndex"):
+        raw = point.get(key)
+        if raw is None:
+            continue
+        try:
+            return int(raw)
+        except Exception:
+            continue
+    return None
+
+
+def _render_monte_carlo_bin_details(mc_result: dict[str, Any], selection: Any, detail_key_prefix: str) -> None:
+    bins = mc_result.get("hist_bins")
+    if not isinstance(bins, pd.DataFrame) or bins.empty:
+        return
+
+    points = _plotly_selected_points(selection)
+    clicked_idx = _selected_point_index(points)
+    if clicked_idx is not None and (clicked_idx < 0 or clicked_idx >= len(bins)):
+        clicked_idx = None
+
+    labels = [
+        f"{int(row['bin_index']) + 1}: {float(row['left']):.1f} .. {float(row['right']):.1f}"
+        for _, row in bins.iterrows()
+    ]
+    default_idx = int(np.argmax(bins["count"].to_numpy())) if len(labels) else 0
+    select_key = f"{detail_key_prefix}_bin_select"
+    if labels:
+        if select_key not in st.session_state:
+            st.session_state[select_key] = labels[default_idx]
+        if clicked_idx is not None:
+            st.session_state[select_key] = labels[clicked_idx]
+
+    st.markdown("**Детализация столбца Monte Carlo**")
+    st.caption("Кликните на столбец гистограммы или выберите диапазон вручную.")
+    selected_label = st.selectbox(
+        "Диапазон прогноза (бин)",
+        labels,
+        key=select_key,
+    )
+    selected_idx = labels.index(selected_label)
+    row = bins.iloc[selected_idx]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Диапазон", f"{float(row['left']):.1f} .. {float(row['right']):.1f}")
+    c2.metric("Сценариев в бине", f"{int(row['count'])}")
+    c3.metric("Вероятность бина", f"{float(row['probability']):.2%}")
+    c4.metric("Средний прогноз в бине", f"{float(row['prediction_mean']):.1f}")
+
+    detail_df = pd.DataFrame(
+        [
+            {"Параметр": "Нефть Brent", "Среднее в бине": float(row["oil_mean"])},
+            {"Параметр": "Ключевая ставка", "Среднее в бине": float(row["key_rate_mean"])},
+            {"Параметр": "USD/RUB", "Среднее в бине": float(row["usd_rub_mean"])},
+            {"Параметр": "Инфляция", "Среднее в бине": float(row["inflation_mean"])},
+        ]
+    )
+    st.dataframe(detail_df, use_container_width=True, hide_index=True)
+
+    base = mc_result.get("base_params", {})
+    std_map = mc_result.get("std_map", {})
+    st.markdown(
+        f"""
+        **Как посчитан выбранный столбец**
+        - Для каждого макрофактора генерируются сценарии по нормальному закону:
+          `X ~ N(μ, σ)`, где `μ` — базовое значение, `σ` — историческая волатильность.
+        - Затем модель считает прогноз актива для каждого сценария, после чего применяется суммарная корректировка сценария.
+        - Текущий столбец агрегирует прогнозы, попавшие в интервал **[{float(row['left']):.1f}; {float(row['right']):.1f})**.
+        - В нём **{int(row['count'])}** сценариев из **{int(mc_result.get('n_simulations', 0))}**.
+        """
+    )
+    st.caption(
+        "Базовые μ: "
+        f"oil={float(base.get('oil', np.nan)):.2f}, "
+        f"key_rate={float(base.get('key_rate', np.nan)):.2f}, "
+        f"usd_rub={float(base.get('usd_rub', np.nan)):.2f}, "
+        f"inflation={float(base.get('inflation', np.nan)):.2f}"
+    )
+    st.caption(
+        "Использованные σ: "
+        f"oil={float(std_map.get('oil', np.nan)):.2f}, "
+        f"key_rate={float(std_map.get('key_rate', np.nan)):.2f}, "
+        f"usd_rub={float(std_map.get('usd_rub', np.nan)):.2f}, "
+        f"inflation={float(std_map.get('inflation', np.nan)):.2f}"
+    )
+
+
+def _render_sobol_factor_details(sobol_result: dict[str, Any], selection: Any, detail_key_prefix: str) -> None:
+    sobol_df = sobol_result.get("sobol_df")
+    problem = sobol_result.get("problem", {})
+    if not isinstance(sobol_df, pd.DataFrame) or sobol_df.empty:
+        return
+
+    points = _plotly_selected_points(selection)
+    clicked_idx = _selected_point_index(points)
+    if clicked_idx is not None and (clicked_idx < 0 or clicked_idx >= len(sobol_df)):
+        clicked_idx = None
+
+    labels = sobol_df["factor_label"].astype(str).tolist()
+    select_key = f"{detail_key_prefix}_factor_select"
+    if labels:
+        if select_key not in st.session_state:
+            st.session_state[select_key] = labels[0]
+        if clicked_idx is not None:
+            st.session_state[select_key] = labels[clicked_idx]
+
+    st.markdown("**Детализация выбранного столбца Sobol**")
+    st.caption("Кликните на столбец Tornado Chart или выберите фактор вручную.")
+    selected_label = st.selectbox("Фактор", labels, key=select_key)
+    selected_idx = labels.index(selected_label)
+    row = sobol_df.iloc[selected_idx]
+
+    factor = str(row["factor"])
+    bounds_map = {
+        str(name): (float(bound[0]), float(bound[1]))
+        for name, bound in zip(problem.get("names", []), problem.get("bounds", []))
+    }
+    low, high = bounds_map.get(factor, (float("nan"), float("nan")))
+    sign_text = "позитивное" if int(row.get("impact_sign", 1)) > 0 else "негативное"
+    s1 = float(row["S1"])
+    s1_conf = float(row.get("S1_conf", np.nan))
+
+    d = len(problem.get("names", []))
+    n_samples = int(sobol_result.get("n_samples", 0))
+    n_evaluations = int(sobol_result.get("n_evaluations", 0))
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("S1", f"{s1:.3f}")
+    c2.metric("S1 ± conf", f"{s1_conf:.3f}")
+    c3.metric("Диапазон фактора", f"{low:.2f} .. {high:.2f}")
+    c4.metric("Направление", sign_text)
+
+    st.markdown(
+        f"""
+        **Как посчитан вклад фактора `{selected_label}`**
+        - Используется разложение Соболя первого порядка:
+          `S1ᵢ = Var(E[Y|Xᵢ]) / Var(Y)`.
+        - Значение `S1={s1:.3f}` означает долю вариации прогноза, объясняемую только этим фактором.
+        - Для расчета берутся Saltelli-сэмплы по диапазону **[{low:.2f}; {high:.2f}]**.
+        - В этом запуске: `D={d}` факторов, `N={n_samples}` базовых сэмплов, фактических прогонов модели: **{n_evaluations}**.
+        """
+    )
+
+
 def main() -> None:
     st.title("Симулятор экономических сценариев для рынка РФ")
 
@@ -1806,7 +1993,14 @@ def main() -> None:
         if mc_result:
             if mc_stale:
                 st.warning("Показан результат Monte Carlo для предыдущих параметров. Нажмите кнопку для пересчета.")
-            st.plotly_chart(mc_result["figure"], use_container_width=True)
+            mc_chart_key = f"mc_hist_{asset_type}_{ticker or 'imoex'}_{regime}"
+            mc_selection = st.plotly_chart(
+                mc_result["figure"],
+                use_container_width=True,
+                key=mc_chart_key,
+                on_select="rerun",
+                selection_mode=("points",),
+            )
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("P5", f"{mc_result['var_5']:.1f}")
             c2.metric("P50", f"{mc_result['p50']:.1f}")
@@ -1819,6 +2013,11 @@ def main() -> None:
                 f"Масштаб волатильности: {controls['uncertainty_scale']:.1f}x | "
                 f"Режим: {regime} | "
                 f"Симуляций: {5000 if cpu_saver else 10000}"
+            )
+            _render_monte_carlo_bin_details(
+                mc_result,
+                selection=mc_selection,
+                detail_key_prefix=f"{mc_chart_key}_{len(mc_result.get('results', []))}",
             )
 
     with tabs[3]:
@@ -1858,7 +2057,14 @@ def main() -> None:
         if sobol_result:
             if sobol_stale:
                 st.warning("Показан результат Sobol для предыдущих параметров. Нажмите кнопку для пересчета.")
-            st.plotly_chart(sobol_result["figure"], use_container_width=True)
+            sobol_chart_key = f"sobol_{asset_type}_{ticker or 'imoex'}_{regime}"
+            sobol_selection = st.plotly_chart(
+                sobol_result["figure"],
+                use_container_width=True,
+                key=sobol_chart_key,
+                on_select="rerun",
+                selection_mode=("points",),
+            )
             st.info(
                 "Наибольшее влияние оказывает "
                 f"`{sobol_result['top_factor']}` (S1={sobol_result['top_s1']:.2f})"
@@ -1868,6 +2074,11 @@ def main() -> None:
                 "не входят в Sobol-разложение, так как применяются пост-коррекцией к прогнозу."
             )
             st.caption(f"Объем выборки Sobol: {256 if cpu_saver else 512}")
+            _render_sobol_factor_details(
+                sobol_result,
+                selection=sobol_selection,
+                detail_key_prefix=f"{sobol_chart_key}_{sobol_result.get('n_evaluations', 0)}",
+            )
 
 
 if __name__ == "__main__":
