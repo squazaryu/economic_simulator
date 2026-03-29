@@ -1141,34 +1141,48 @@ def _simulation_context_key(
     )
 
 
-def _ensure_timeline_editor_source(source: Any, controls: dict[str, float], default_rows: int) -> pd.DataFrame:
-    expected_cols = ["date", "oil", "key_rate", "usd_rub", "inflation"]
-    if not isinstance(source, pd.DataFrame):
-        return _timeline_seed_frame(controls, default_rows)
+def _resize_timeline_editor_source(source: Any, controls: dict[str, float], row_count: int) -> pd.DataFrame:
+    rows = max(int(row_count), 1)
+    out = _timeline_seed_frame(controls, rows)
+    if not isinstance(source, pd.DataFrame) or source.empty:
+        return out
 
-    row_count = max(len(source), 1)
-    out = _timeline_seed_frame(controls, row_count)
-    for col in expected_cols:
-        if col in source.columns and len(source) > 0:
-            out.loc[: len(source) - 1, col] = source[col].to_numpy()
-    return out[expected_cols]
+    copy_rows = min(len(source), rows)
+    for col in ("oil", "key_rate", "usd_rub", "inflation"):
+        if col in source.columns:
+            parsed = pd.to_numeric(source[col].iloc[:copy_rows], errors="coerce")
+            out.loc[: copy_rows - 1, col] = parsed.to_numpy()
+    return out
 
 
-def _ensure_compare_editor_source(source: Any, defaults: dict[str, float], controls: dict[str, float]) -> pd.DataFrame:
+def _resize_compare_editor_source(
+    source: Any,
+    defaults: dict[str, float],
+    controls: dict[str, float],
+    row_count: int,
+) -> pd.DataFrame:
+    rows = min(max(int(row_count), 2), 8)
     template = _scenario_comparison_seed(defaults, controls)
     expected_cols = list(template.columns)
-    if not isinstance(source, pd.DataFrame):
-        return template
 
-    if len(source) == 0:
-        return template
+    seed_rows: list[dict[str, Any]] = []
+    for idx in range(rows):
+        if idx < len(template):
+            seed_rows.append(template.iloc[idx].to_dict())
+        else:
+            extra = template.iloc[0].to_dict()
+            extra["Сценарий"] = f"Сценарий {idx + 1}"
+            seed_rows.append(extra)
+    out = pd.DataFrame(seed_rows, columns=expected_cols)
 
-    out = source.copy()
+    if not isinstance(source, pd.DataFrame) or source.empty:
+        return out
+
+    copy_rows = min(len(source), rows)
     for col in expected_cols:
-        if col not in out.columns:
-            out[col] = template[col].iloc[0]
-    out = out[expected_cols]
-    return out
+        if col in source.columns:
+            out.loc[: copy_rows - 1, col] = source[col].iloc[:copy_rows].to_numpy()
+    return out[expected_cols]
 
 
 def main() -> None:
@@ -1392,46 +1406,63 @@ def main() -> None:
             st.plotly_chart(
                 _trajectory_figure(current, forecast_paths, horizon_months=horizon_months, asset_label=asset_label),
                 use_container_width=True,
+                key=f"fan_{asset_type}_{ticker or 'imoex'}_{regime}_{horizon_months}_{n_paths}",
             )
         except Exception as exc:
             st.warning(f"Не удалось построить траектории прогноза: {exc}")
 
         st.markdown("**Интерактивный таймлайн сценария (ручной ввод по месяцам)**")
         timeline_seed_key = f"timeline_seed_{asset_type}_{ticker or 'imoex'}_{regime}_{horizon_months}"
-        timeline_editor_key = f"timeline_editor_{timeline_seed_key}"
+        timeline_editor_key = f"timeline_editor_{timeline_seed_key}_v2"
+        timeline_rows_key = f"timeline_rows_{asset_type}_{ticker or 'imoex'}_{regime}_v2"
+
+        if timeline_rows_key not in st.session_state:
+            st.session_state[timeline_rows_key] = int(horizon_months)
         if timeline_seed_key not in st.session_state:
             st.session_state[timeline_seed_key] = _timeline_seed_frame(controls, horizon_months)
-        st.session_state[timeline_seed_key] = _ensure_timeline_editor_source(
-            st.session_state[timeline_seed_key],
-            controls=controls,
-            default_rows=horizon_months,
-        )
 
-        r1, r2 = st.columns([1, 2])
+        r1, r2, r3 = st.columns([1.1, 1.4, 1.8])
         if r1.button("Сбросить таймлайн под текущие параметры", key=f"reset_{timeline_seed_key}"):
             st.session_state[timeline_seed_key] = _timeline_seed_frame(controls, horizon_months)
+            st.session_state[timeline_rows_key] = int(horizon_months)
             st.session_state.pop(timeline_editor_key, None)
-        r2.caption("Можно редактировать макропараметры и добавлять/удалять строки горизонта.")
+        if r2.button("Синхронизировать строки с горизонтом", key=f"sync_rows_{timeline_seed_key}"):
+            st.session_state[timeline_rows_key] = int(horizon_months)
+            st.session_state.pop(timeline_editor_key, None)
+        r3.number_input("Строк в таймлайне", min_value=1, max_value=24, step=1, key=timeline_rows_key)
 
-        timeline_df = st.data_editor(
-            st.session_state[timeline_seed_key],
-            hide_index=True,
-            use_container_width=True,
-            num_rows="dynamic",
-            disabled=["date"],
-            column_config={
-                "date": st.column_config.DateColumn("Дата"),
-                "oil": st.column_config.NumberColumn("Нефть", min_value=BASE_SLIDER_CONFIG["oil"]["min"], max_value=BASE_SLIDER_CONFIG["oil"]["max"], step=BASE_SLIDER_CONFIG["oil"]["step"]),
-                "key_rate": st.column_config.NumberColumn("Ставка", min_value=BASE_SLIDER_CONFIG["key_rate"]["min"], max_value=BASE_SLIDER_CONFIG["key_rate"]["max"], step=BASE_SLIDER_CONFIG["key_rate"]["step"]),
-                "usd_rub": st.column_config.NumberColumn("USD/RUB", min_value=BASE_SLIDER_CONFIG["usd_rub"]["min"], max_value=BASE_SLIDER_CONFIG["usd_rub"]["max"], step=BASE_SLIDER_CONFIG["usd_rub"]["step"]),
-                "inflation": st.column_config.NumberColumn("Инфляция", min_value=BASE_SLIDER_CONFIG["inflation"]["min"], max_value=BASE_SLIDER_CONFIG["inflation"]["max"], step=BASE_SLIDER_CONFIG["inflation"]["step"]),
-            },
-            key=timeline_editor_key,
+        timeline_row_count = int(st.session_state[timeline_rows_key])
+        st.session_state[timeline_seed_key] = _resize_timeline_editor_source(
+            st.session_state.get(timeline_seed_key),
+            controls=controls,
+            row_count=timeline_row_count,
         )
-        st.session_state[timeline_seed_key] = _ensure_timeline_editor_source(
+
+        try:
+            timeline_df = st.data_editor(
+                st.session_state[timeline_seed_key],
+                hide_index=True,
+                use_container_width=True,
+                num_rows="fixed",
+                disabled=["date"],
+                column_config={
+                    "date": st.column_config.DateColumn("Дата"),
+                    "oil": st.column_config.NumberColumn("Нефть", min_value=BASE_SLIDER_CONFIG["oil"]["min"], max_value=BASE_SLIDER_CONFIG["oil"]["max"], step=BASE_SLIDER_CONFIG["oil"]["step"]),
+                    "key_rate": st.column_config.NumberColumn("Ставка", min_value=BASE_SLIDER_CONFIG["key_rate"]["min"], max_value=BASE_SLIDER_CONFIG["key_rate"]["max"], step=BASE_SLIDER_CONFIG["key_rate"]["step"]),
+                    "usd_rub": st.column_config.NumberColumn("USD/RUB", min_value=BASE_SLIDER_CONFIG["usd_rub"]["min"], max_value=BASE_SLIDER_CONFIG["usd_rub"]["max"], step=BASE_SLIDER_CONFIG["usd_rub"]["step"]),
+                    "inflation": st.column_config.NumberColumn("Инфляция", min_value=BASE_SLIDER_CONFIG["inflation"]["min"], max_value=BASE_SLIDER_CONFIG["inflation"]["max"], step=BASE_SLIDER_CONFIG["inflation"]["step"]),
+                },
+                key=timeline_editor_key,
+            )
+        except Exception as exc:
+            st.warning(f"Таймлайн-таблица была восстановлена после сбоя: {exc}")
+            st.session_state.pop(timeline_editor_key, None)
+            timeline_df = st.session_state[timeline_seed_key]
+
+        st.session_state[timeline_seed_key] = _resize_timeline_editor_source(
             timeline_df,
             controls=controls,
-            default_rows=horizon_months,
+            row_count=timeline_row_count,
         )
 
         try:
@@ -1473,44 +1504,63 @@ def main() -> None:
             st.warning(f"Не удалось рассчитать ручной таймлайн: {exc}")
 
         st.markdown("**Интерактивное сравнение 2-3 сценариев**")
-        st.caption("Можно добавлять/удалять строки сценариев прямо в таблице.")
+        st.caption("Управляйте числом строк и параметрами сценариев в стабильном табличном режиме.")
         compare_seed_key = f"compare_seed_{asset_type}_{ticker or 'imoex'}_{regime}"
-        compare_editor_key = f"editor_{compare_seed_key}"
+        compare_editor_key = f"editor_{compare_seed_key}_v2"
+        scenario_rows_key = f"scenario_rows_{asset_type}_{ticker or 'imoex'}_{regime}_v2"
+
+        if scenario_rows_key not in st.session_state:
+            st.session_state[scenario_rows_key] = 3
         if compare_seed_key not in st.session_state:
             st.session_state[compare_seed_key] = _scenario_comparison_seed(defaults, controls)
-        st.session_state[compare_seed_key] = _ensure_compare_editor_source(
-            st.session_state[compare_seed_key],
+        c1, c2, c3 = st.columns([1.1, 1.2, 1.4])
+        if c1.button("Сбросить таблицу сценариев", key=f"reset_{compare_seed_key}"):
+            st.session_state[compare_seed_key] = _scenario_comparison_seed(defaults, controls)
+            st.session_state[scenario_rows_key] = 3
+            st.session_state.pop(compare_editor_key, None)
+        if c2.button("Синхронизировать строки с 3 базовыми сценариями", key=f"sync_{compare_seed_key}"):
+            st.session_state[scenario_rows_key] = 3
+            st.session_state.pop(compare_editor_key, None)
+        c3.number_input("Строк в таблице сценариев", min_value=2, max_value=8, step=1, key=scenario_rows_key)
+
+        scenario_row_count = int(st.session_state[scenario_rows_key])
+        st.session_state[compare_seed_key] = _resize_compare_editor_source(
+            st.session_state.get(compare_seed_key),
             defaults=defaults,
             controls=controls,
+            row_count=scenario_row_count,
         )
 
-        if st.button("Сбросить таблицу сценариев", key=f"reset_{compare_seed_key}"):
-            st.session_state[compare_seed_key] = _scenario_comparison_seed(defaults, controls)
+        try:
+            editor_df = st.data_editor(
+                st.session_state[compare_seed_key].copy(),
+                hide_index=True,
+                use_container_width=True,
+                num_rows="fixed",
+                column_config={
+                    "Сценарий": st.column_config.TextColumn("Сценарий"),
+                    "Нефть": st.column_config.NumberColumn("Нефть", min_value=BASE_SLIDER_CONFIG["oil"]["min"], max_value=BASE_SLIDER_CONFIG["oil"]["max"], step=BASE_SLIDER_CONFIG["oil"]["step"]),
+                    "Ставка": st.column_config.NumberColumn("Ставка", min_value=BASE_SLIDER_CONFIG["key_rate"]["min"], max_value=BASE_SLIDER_CONFIG["key_rate"]["max"], step=BASE_SLIDER_CONFIG["key_rate"]["step"]),
+                    "USD/RUB": st.column_config.NumberColumn("USD/RUB", min_value=BASE_SLIDER_CONFIG["usd_rub"]["min"], max_value=BASE_SLIDER_CONFIG["usd_rub"]["max"], step=BASE_SLIDER_CONFIG["usd_rub"]["step"]),
+                    "Инфляция": st.column_config.NumberColumn("Инфляция", min_value=BASE_SLIDER_CONFIG["inflation"]["min"], max_value=BASE_SLIDER_CONFIG["inflation"]["max"], step=BASE_SLIDER_CONFIG["inflation"]["step"]),
+                    "Сентимент": st.column_config.NumberColumn("Сентимент", min_value=ADDITIONAL_SLIDER_CONFIG["market_sentiment"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["market_sentiment"]["max"], step=ADDITIONAL_SLIDER_CONFIG["market_sentiment"]["step"]),
+                    "Ликвидность": st.column_config.NumberColumn("Ликвидность", min_value=ADDITIONAL_SLIDER_CONFIG["liquidity_effect"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["liquidity_effect"]["max"], step=ADDITIONAL_SLIDER_CONFIG["liquidity_effect"]["step"]),
+                    "Геополитика": st.column_config.NumberColumn("Геополитика", min_value=ADDITIONAL_SLIDER_CONFIG["geopolitics_effect"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["geopolitics_effect"]["max"], step=ADDITIONAL_SLIDER_CONFIG["geopolitics_effect"]["step"]),
+                    "Регуляторика": st.column_config.NumberColumn("Регуляторика", min_value=ADDITIONAL_SLIDER_CONFIG["regulatory_effect"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["regulatory_effect"]["max"], step=ADDITIONAL_SLIDER_CONFIG["regulatory_effect"]["step"]),
+                    "Волатильность": st.column_config.NumberColumn("Волатильность", min_value=ADDITIONAL_SLIDER_CONFIG["uncertainty_scale"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["uncertainty_scale"]["max"], step=ADDITIONAL_SLIDER_CONFIG["uncertainty_scale"]["step"]),
+                },
+                key=compare_editor_key,
+            )
+        except Exception as exc:
+            st.warning(f"Таблица сценариев была восстановлена после сбоя: {exc}")
             st.session_state.pop(compare_editor_key, None)
+            editor_df = st.session_state[compare_seed_key]
 
-        editor_df = st.data_editor(
-            st.session_state[compare_seed_key].copy(),
-            hide_index=True,
-            use_container_width=True,
-            num_rows="dynamic",
-            column_config={
-                "Сценарий": st.column_config.TextColumn("Сценарий"),
-                "Нефть": st.column_config.NumberColumn("Нефть", min_value=BASE_SLIDER_CONFIG["oil"]["min"], max_value=BASE_SLIDER_CONFIG["oil"]["max"], step=BASE_SLIDER_CONFIG["oil"]["step"]),
-                "Ставка": st.column_config.NumberColumn("Ставка", min_value=BASE_SLIDER_CONFIG["key_rate"]["min"], max_value=BASE_SLIDER_CONFIG["key_rate"]["max"], step=BASE_SLIDER_CONFIG["key_rate"]["step"]),
-                "USD/RUB": st.column_config.NumberColumn("USD/RUB", min_value=BASE_SLIDER_CONFIG["usd_rub"]["min"], max_value=BASE_SLIDER_CONFIG["usd_rub"]["max"], step=BASE_SLIDER_CONFIG["usd_rub"]["step"]),
-                "Инфляция": st.column_config.NumberColumn("Инфляция", min_value=BASE_SLIDER_CONFIG["inflation"]["min"], max_value=BASE_SLIDER_CONFIG["inflation"]["max"], step=BASE_SLIDER_CONFIG["inflation"]["step"]),
-                "Сентимент": st.column_config.NumberColumn("Сентимент", min_value=ADDITIONAL_SLIDER_CONFIG["market_sentiment"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["market_sentiment"]["max"], step=ADDITIONAL_SLIDER_CONFIG["market_sentiment"]["step"]),
-                "Ликвидность": st.column_config.NumberColumn("Ликвидность", min_value=ADDITIONAL_SLIDER_CONFIG["liquidity_effect"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["liquidity_effect"]["max"], step=ADDITIONAL_SLIDER_CONFIG["liquidity_effect"]["step"]),
-                "Геополитика": st.column_config.NumberColumn("Геополитика", min_value=ADDITIONAL_SLIDER_CONFIG["geopolitics_effect"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["geopolitics_effect"]["max"], step=ADDITIONAL_SLIDER_CONFIG["geopolitics_effect"]["step"]),
-                "Регуляторика": st.column_config.NumberColumn("Регуляторика", min_value=ADDITIONAL_SLIDER_CONFIG["regulatory_effect"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["regulatory_effect"]["max"], step=ADDITIONAL_SLIDER_CONFIG["regulatory_effect"]["step"]),
-                "Волатильность": st.column_config.NumberColumn("Волатильность", min_value=ADDITIONAL_SLIDER_CONFIG["uncertainty_scale"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["uncertainty_scale"]["max"], step=ADDITIONAL_SLIDER_CONFIG["uncertainty_scale"]["step"]),
-            },
-            key=compare_editor_key,
-        )
-        st.session_state[compare_seed_key] = _ensure_compare_editor_source(
+        st.session_state[compare_seed_key] = _resize_compare_editor_source(
             editor_df,
             defaults=defaults,
             controls=controls,
+            row_count=scenario_row_count,
         )
 
         normalized_editor_df = st.session_state[compare_seed_key]
@@ -1519,10 +1569,6 @@ def main() -> None:
             st.info("Добавьте минимум 2 строки сценариев для сравнения.")
         else:
             try:
-                if len(normalized_editor_df) > 8:
-                    st.warning("Для производительности используются первые 8 строк таблицы.")
-                    normalized_editor_df = normalized_editor_df.head(8)
-
                 cmp_df = _scenario_comparison_from_editor(
                     scenarios_df=normalized_editor_df,
                     asset_type=asset_type,
