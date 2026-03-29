@@ -1141,6 +1141,36 @@ def _simulation_context_key(
     )
 
 
+def _ensure_timeline_editor_source(source: Any, controls: dict[str, float], default_rows: int) -> pd.DataFrame:
+    expected_cols = ["date", "oil", "key_rate", "usd_rub", "inflation"]
+    if not isinstance(source, pd.DataFrame):
+        return _timeline_seed_frame(controls, default_rows)
+
+    row_count = max(len(source), 1)
+    out = _timeline_seed_frame(controls, row_count)
+    for col in expected_cols:
+        if col in source.columns and len(source) > 0:
+            out.loc[: len(source) - 1, col] = source[col].to_numpy()
+    return out[expected_cols]
+
+
+def _ensure_compare_editor_source(source: Any, defaults: dict[str, float], controls: dict[str, float]) -> pd.DataFrame:
+    template = _scenario_comparison_seed(defaults, controls)
+    expected_cols = list(template.columns)
+    if not isinstance(source, pd.DataFrame):
+        return template
+
+    if len(source) == 0:
+        return template
+
+    out = source.copy()
+    for col in expected_cols:
+        if col not in out.columns:
+            out[col] = template[col].iloc[0]
+    out = out[expected_cols]
+    return out
+
+
 def main() -> None:
     st.title("Симулятор экономических сценариев для рынка РФ")
 
@@ -1368,12 +1398,19 @@ def main() -> None:
 
         st.markdown("**Интерактивный таймлайн сценария (ручной ввод по месяцам)**")
         timeline_seed_key = f"timeline_seed_{asset_type}_{ticker or 'imoex'}_{regime}_{horizon_months}"
+        timeline_editor_key = f"timeline_editor_{timeline_seed_key}"
         if timeline_seed_key not in st.session_state:
             st.session_state[timeline_seed_key] = _timeline_seed_frame(controls, horizon_months)
+        st.session_state[timeline_seed_key] = _ensure_timeline_editor_source(
+            st.session_state[timeline_seed_key],
+            controls=controls,
+            default_rows=horizon_months,
+        )
 
         r1, r2 = st.columns([1, 2])
         if r1.button("Сбросить таймлайн под текущие параметры", key=f"reset_{timeline_seed_key}"):
             st.session_state[timeline_seed_key] = _timeline_seed_frame(controls, horizon_months)
+            st.session_state.pop(timeline_editor_key, None)
         r2.caption("Можно редактировать макропараметры и добавлять/удалять строки горизонта.")
 
         timeline_df = st.data_editor(
@@ -1389,12 +1426,16 @@ def main() -> None:
                 "usd_rub": st.column_config.NumberColumn("USD/RUB", min_value=BASE_SLIDER_CONFIG["usd_rub"]["min"], max_value=BASE_SLIDER_CONFIG["usd_rub"]["max"], step=BASE_SLIDER_CONFIG["usd_rub"]["step"]),
                 "inflation": st.column_config.NumberColumn("Инфляция", min_value=BASE_SLIDER_CONFIG["inflation"]["min"], max_value=BASE_SLIDER_CONFIG["inflation"]["max"], step=BASE_SLIDER_CONFIG["inflation"]["step"]),
             },
-            key=f"timeline_editor_{timeline_seed_key}",
+            key=timeline_editor_key,
         )
-        st.session_state[timeline_seed_key] = timeline_df
+        st.session_state[timeline_seed_key] = _ensure_timeline_editor_source(
+            timeline_df,
+            controls=controls,
+            default_rows=horizon_months,
+        )
 
         try:
-            tl = timeline_df.copy()
+            tl = st.session_state[timeline_seed_key].copy()
             timeline_rows = len(tl)
             tl["date"] = pd.date_range(
                 start=pd.Timestamp.today().normalize() + pd.offsets.MonthEnd(1),
@@ -1434,11 +1475,18 @@ def main() -> None:
         st.markdown("**Интерактивное сравнение 2-3 сценариев**")
         st.caption("Можно добавлять/удалять строки сценариев прямо в таблице.")
         compare_seed_key = f"compare_seed_{asset_type}_{ticker or 'imoex'}_{regime}"
+        compare_editor_key = f"editor_{compare_seed_key}"
         if compare_seed_key not in st.session_state:
             st.session_state[compare_seed_key] = _scenario_comparison_seed(defaults, controls)
+        st.session_state[compare_seed_key] = _ensure_compare_editor_source(
+            st.session_state[compare_seed_key],
+            defaults=defaults,
+            controls=controls,
+        )
 
         if st.button("Сбросить таблицу сценариев", key=f"reset_{compare_seed_key}"):
             st.session_state[compare_seed_key] = _scenario_comparison_seed(defaults, controls)
+            st.session_state.pop(compare_editor_key, None)
 
         editor_df = st.data_editor(
             st.session_state[compare_seed_key].copy(),
@@ -1457,20 +1505,26 @@ def main() -> None:
                 "Регуляторика": st.column_config.NumberColumn("Регуляторика", min_value=ADDITIONAL_SLIDER_CONFIG["regulatory_effect"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["regulatory_effect"]["max"], step=ADDITIONAL_SLIDER_CONFIG["regulatory_effect"]["step"]),
                 "Волатильность": st.column_config.NumberColumn("Волатильность", min_value=ADDITIONAL_SLIDER_CONFIG["uncertainty_scale"]["min"], max_value=ADDITIONAL_SLIDER_CONFIG["uncertainty_scale"]["max"], step=ADDITIONAL_SLIDER_CONFIG["uncertainty_scale"]["step"]),
             },
-            key=f"editor_{compare_seed_key}",
+            key=compare_editor_key,
         )
-        st.session_state[compare_seed_key] = editor_df
+        st.session_state[compare_seed_key] = _ensure_compare_editor_source(
+            editor_df,
+            defaults=defaults,
+            controls=controls,
+        )
 
-        if len(editor_df) < 2:
+        normalized_editor_df = st.session_state[compare_seed_key]
+
+        if len(normalized_editor_df) < 2:
             st.info("Добавьте минимум 2 строки сценариев для сравнения.")
         else:
             try:
-                if len(editor_df) > 8:
+                if len(normalized_editor_df) > 8:
                     st.warning("Для производительности используются первые 8 строк таблицы.")
-                    editor_df = editor_df.head(8)
+                    normalized_editor_df = normalized_editor_df.head(8)
 
                 cmp_df = _scenario_comparison_from_editor(
-                    scenarios_df=editor_df,
+                    scenarios_df=normalized_editor_df,
                     asset_type=asset_type,
                     ticker=ticker,
                     regime=regime,
