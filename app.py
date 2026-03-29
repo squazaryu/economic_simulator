@@ -530,14 +530,30 @@ def _adjustment_multiplier(adjustments: dict[str, float]) -> float:
 
 
 def _linear_predict(artifact: dict[str, Any], features: dict[str, np.ndarray | float]) -> np.ndarray:
-    coefs = artifact["coefs"]
-    intercept = float(artifact["intercept"])
+    feature_columns = list(artifact.get("feature_columns", []))
+    coefs = artifact.get("coefs")
+    intercept = artifact.get("intercept")
+
+    if (not isinstance(coefs, dict) or intercept is None) and artifact.get("model") is not None:
+        model = artifact["model"]
+        raw_coef = np.asarray(getattr(model, "coef_", []), dtype=float).ravel()
+        if feature_columns and len(raw_coef) == len(feature_columns):
+            coefs = {col: float(value) for col, value in zip(feature_columns, raw_coef)}
+        if intercept is None and hasattr(model, "intercept_"):
+            intercept = float(model.intercept_)
+
+    if not isinstance(coefs, dict):
+        coefs = {}
+    if intercept is None:
+        intercept = 0.0
+    if not feature_columns:
+        feature_columns = list(features.keys())
 
     first_key = next(iter(features))
     first_val = np.asarray(features[first_key], dtype=float)
-    out = np.full(first_val.shape, intercept, dtype=float)
+    out = np.full(first_val.shape, float(intercept), dtype=float)
 
-    for feature in artifact["feature_columns"]:
+    for feature in feature_columns:
         out += float(coefs.get(feature, 0.0)) * np.asarray(features[feature], dtype=float)
     return out
 

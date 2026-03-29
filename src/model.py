@@ -45,6 +45,13 @@ def _validate_regime(regime: str) -> str:
     return regime_norm
 
 
+def _safe_artifact_regime(raw_regime: Any) -> str:
+    try:
+        return _validate_regime(str(raw_regime or "all"))
+    except ValueError:
+        return "all"
+
+
 def _regime_suffix(regime: str) -> str:
     regime_norm = _validate_regime(regime)
     return "" if regime_norm == "all" else f"_{regime_norm}"
@@ -128,6 +135,92 @@ def _fit_and_pack(
     return artifact
 
 
+def _build_feature_stats(frame: pd.DataFrame, feature_columns: list[str]) -> tuple[dict[str, float], dict[str, float]]:
+    X = frame[feature_columns]
+    means = {col: float(X[col].mean()) for col in feature_columns}
+    stds = {col: float(X[col].std(ddof=1)) for col in feature_columns}
+    return means, stds
+
+
+def _normalize_loaded_artifact(
+    artifact: dict[str, Any],
+    *,
+    feature_columns: list[str],
+    regime: str,
+    stats_frame: pd.DataFrame | None = None,
+    ticker: str | None = None,
+) -> dict[str, Any]:
+    out = dict(artifact)
+    cols = list(out.get("feature_columns") or feature_columns)
+    out["feature_columns"] = cols
+    out["regime"] = _safe_artifact_regime(out.get("regime", regime))
+
+    model = out.get("model")
+    if ("intercept" not in out or out.get("intercept") is None) and model is not None and hasattr(model, "intercept_"):
+        out["intercept"] = float(model.intercept_)
+
+    coefs = out.get("coefs")
+    if not isinstance(coefs, dict):
+        if model is not None and hasattr(model, "coef_"):
+            raw_coef = np.asarray(model.coef_, dtype=float).ravel()
+            if len(raw_coef) == len(cols):
+                out["coefs"] = {col: float(value) for col, value in zip(cols, raw_coef)}
+
+    means = out.get("feature_means")
+    stds = out.get("feature_stds")
+    if not isinstance(means, dict) or not isinstance(stds, dict):
+        if stats_frame is not None and all(col in stats_frame.columns for col in cols):
+            calc_means, calc_stds = _build_feature_stats(stats_frame, cols)
+        else:
+            calc_means = {col: 0.0 for col in cols}
+            calc_stds = {col: 0.0 for col in cols}
+        out["feature_means"] = calc_means
+        out["feature_stds"] = calc_stds
+
+    if ticker:
+        out["ticker"] = ticker.upper().strip()
+    return out
+
+
+def _artifact_is_usable(artifact: dict[str, Any]) -> bool:
+    if "model" not in artifact:
+        return False
+    cols = artifact.get("feature_columns")
+    if not isinstance(cols, list) or not cols:
+        return False
+    if artifact.get("intercept") is None:
+        return False
+    if not isinstance(artifact.get("coefs"), dict):
+        return False
+    if not isinstance(artifact.get("feature_means"), dict):
+        return False
+    if not isinstance(artifact.get("feature_stds"), dict):
+        return False
+    return True
+
+
+def _artifact_coefs(artifact: dict[str, Any]) -> dict[str, float]:
+    coefs = artifact.get("coefs")
+    if isinstance(coefs, dict):
+        return {str(k): float(v) for k, v in coefs.items()}
+
+    cols = [str(c) for c in artifact.get("feature_columns", [])]
+    model = artifact.get("model")
+    if model is not None and cols and hasattr(model, "coef_"):
+        raw_coef = np.asarray(model.coef_, dtype=float).ravel()
+        if len(raw_coef) == len(cols):
+            return {col: float(value) for col, value in zip(cols, raw_coef)}
+    return {col: 0.0 for col in cols}
+
+
+def _artifact_feature_means(artifact: dict[str, Any]) -> dict[str, float]:
+    cols = [str(c) for c in artifact.get("feature_columns", [])]
+    means = artifact.get("feature_means")
+    if isinstance(means, dict):
+        return {col: float(means.get(col, 0.0)) for col in cols}
+    return {col: 0.0 for col in cols}
+
+
 def _prepare_imoex_training_frame(use_returns_target: bool = False, regime: str = "all") -> tuple[pd.DataFrame, str]:
     dataset = load_processed_dataset()
     target_col = TARGET_RET if use_returns_target else TARGET_CLOSE
@@ -175,9 +268,32 @@ def load_model_artifact(path: Path | None = None, regime: str = "all") -> dict[s
     model_path = path or _imoex_model_path(regime_norm)
     if model_path.exists():
         artifact = joblib.load(model_path)
-        artifact_regime = _validate_regime(str(artifact.get("regime", "all")))
+        artifact_regime = _safe_artifact_regime(artifact.get("regime", "all"))
         if artifact_regime == regime_norm:
-            return artifact
+            should_persist = (
+                not isinstance(artifact.get("coefs"), dict)
+                or artifact.get("intercept") is None
+                or not isinstance(artifact.get("feature_means"), dict)
+                or not isinstance(artifact.get("feature_stds"), dict)
+                or not isinstance(artifact.get("feature_columns"), list)
+                or _safe_artifact_regime(artifact.get("regime", "all")) != regime_norm
+            )
+            stats_frame: pd.DataFrame | None = None
+            if not isinstance(artifact.get("feature_means"), dict) or not isinstance(artifact.get("feature_stds"), dict):
+                try:
+                    stats_frame, _ = _prepare_imoex_training_frame(use_returns_target=False, regime=regime_norm)
+                except Exception:
+                    stats_frame = None
+            normalized = _normalize_loaded_artifact(
+                artifact,
+                feature_columns=IMOEX_FEATURE_COLUMNS,
+                regime=regime_norm,
+                stats_frame=stats_frame,
+            )
+            if _artifact_is_usable(normalized):
+                if should_persist:
+                    joblib.dump(normalized, model_path)
+                return normalized
     return train_regression_model(save_path=model_path, regime=regime_norm)
 
 
@@ -232,9 +348,33 @@ def load_stock_model_artifact(ticker: str, regime: str = "all") -> dict[str, Any
     path = _stock_model_path(symbol, regime=regime_norm)
     if path.exists():
         artifact = joblib.load(path)
-        artifact_regime = _validate_regime(str(artifact.get("regime", "all")))
+        artifact_regime = _safe_artifact_regime(artifact.get("regime", "all"))
         if artifact_regime == regime_norm:
-            return artifact
+            should_persist = (
+                not isinstance(artifact.get("coefs"), dict)
+                or artifact.get("intercept") is None
+                or not isinstance(artifact.get("feature_means"), dict)
+                or not isinstance(artifact.get("feature_stds"), dict)
+                or not isinstance(artifact.get("feature_columns"), list)
+                or _safe_artifact_regime(artifact.get("regime", "all")) != regime_norm
+            )
+            stats_frame: pd.DataFrame | None = None
+            if not isinstance(artifact.get("feature_means"), dict) or not isinstance(artifact.get("feature_stds"), dict):
+                try:
+                    stats_frame, _ = _prepare_stock_training_frame(symbol, regime=regime_norm)
+                except Exception:
+                    stats_frame = None
+            normalized = _normalize_loaded_artifact(
+                artifact,
+                feature_columns=STOCK_FEATURE_COLUMNS,
+                regime=regime_norm,
+                stats_frame=stats_frame,
+                ticker=symbol,
+            )
+            if _artifact_is_usable(normalized):
+                if should_persist:
+                    joblib.dump(normalized, path)
+                return normalized
     return train_stock_model(symbol, regime=regime_norm)
 
 
@@ -322,8 +462,8 @@ def explain_imoex_drivers(
     regime: str = "all",
 ) -> pd.DataFrame:
     artifact = load_model_artifact(regime=regime)
-    coefs = artifact["coefs"]
-    means = artifact["feature_means"]
+    coefs = _artifact_coefs(artifact)
+    means = _artifact_feature_means(artifact)
 
     feature_values = {
         "brent_usd": float(oil),
@@ -352,8 +492,8 @@ def explain_stock_drivers(
     regime: str = "all",
 ) -> pd.DataFrame:
     artifact = load_stock_model_artifact(ticker, regime=regime)
-    coefs = artifact["coefs"]
-    means = artifact["feature_means"]
+    coefs = _artifact_coefs(artifact)
+    means = _artifact_feature_means(artifact)
 
     feature_values = {
         "brent_usd": float(oil),
