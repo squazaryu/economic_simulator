@@ -3,7 +3,6 @@ numpy
 scikit-learn
 plotly
 streamlit
-streamlit-plotly-events
 SALib
 yfinance
 aiomoex

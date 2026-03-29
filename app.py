@@ -9,10 +9,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
-try:
-    from streamlit_plotly_events import plotly_events
-except ImportError:  # pragma: no cover - optional interactive dependency
-    plotly_events = None
 
 from src.data_loader import load_moex_stock, load_moex_tickers
 from src.model import (
@@ -1252,24 +1248,8 @@ def main() -> None:
         corr_fig = _correlation_heatmap(plot_df, asset_type, ticker)
         corr_cols = _correlation_columns(plot_df, asset_type, ticker)
         labels = _factor_label_map(ticker)
-        reverse_labels = {v: k for k, v in labels.items()}
-
-        if plotly_events is not None:
-            clicked = plotly_events(
-                corr_fig,
-                click_event=True,
-                select_event=False,
-                hover_event=False,
-                key="corr_heatmap_click",
-            )
-            if clicked:
-                x_raw = reverse_labels.get(str(clicked[0].get("x", "")))
-                y_raw = reverse_labels.get(str(clicked[0].get("y", "")))
-                if x_raw in corr_cols and y_raw in corr_cols and x_raw != y_raw:
-                    st.session_state["corr_pair"] = (x_raw, y_raw)
-        else:
-            st.plotly_chart(corr_fig, use_container_width=True)
-            st.caption("Для клика по матрице установите пакет `streamlit-plotly-events`.")
+        st.plotly_chart(corr_fig, use_container_width=True)
+        st.caption("Выбор пары для drilldown делается через селекторы ниже (стабильный режим).")
 
         with st.expander("Как читать корреляционную матрицу"):
             st.markdown(
