@@ -1215,7 +1215,29 @@ def _plotly_selected_points(selection: Any) -> list[dict[str, Any]]:
         if isinstance(candidate, dict):
             points = candidate.get("points", [])
             if isinstance(points, list):
-                return [p for p in points if isinstance(p, dict)]
+                normalized: list[dict[str, Any]] = []
+                for p in points:
+                    if isinstance(p, dict):
+                        normalized.append(p)
+                        continue
+                    to_dict = getattr(p, "to_dict", None)
+                    if callable(to_dict):
+                        try:
+                            pdict = to_dict()
+                            if isinstance(pdict, dict):
+                                normalized.append(pdict)
+                                continue
+                        except Exception:
+                            pass
+                    try:
+                        normalized.append(dict(p))
+                        continue
+                    except Exception:
+                        pass
+                    pvars = vars(p) if hasattr(p, "__dict__") else None
+                    if isinstance(pvars, dict):
+                        normalized.append(pvars)
+                return normalized
 
     return []
 
@@ -1309,6 +1331,58 @@ def _render_monte_carlo_bin_details(mc_result: dict[str, Any], selection: Any, d
         f"usd_rub={float(std_map.get('usd_rub', np.nan)):.2f}, "
         f"inflation={float(std_map.get('inflation', np.nan)):.2f}"
     )
+
+
+def _ensure_mc_detail_payload(mc_result: dict[str, Any], controls: dict[str, float]) -> dict[str, Any]:
+    if not isinstance(mc_result, dict):
+        return mc_result
+
+    bins = mc_result.get("hist_bins")
+    if isinstance(bins, pd.DataFrame) and not bins.empty:
+        return mc_result
+
+    results_raw = mc_result.get("results")
+    try:
+        results = np.asarray(results_raw, dtype=float)
+    except Exception:
+        return mc_result
+    if results.size == 0:
+        return mc_result
+
+    counts, edges = np.histogram(results, bins=60)
+    centers = (edges[:-1] + edges[1:]) / 2.0
+    total = len(results)
+    fallback_bins = pd.DataFrame(
+        {
+            "bin_index": np.arange(len(counts), dtype=int),
+            "left": edges[:-1],
+            "right": edges[1:],
+            "center": centers,
+            "count": counts.astype(int),
+            "probability": counts / total if total else 0.0,
+            "oil_mean": np.nan,
+            "key_rate_mean": np.nan,
+            "usd_rub_mean": np.nan,
+            "inflation_mean": np.nan,
+            "prediction_mean": np.nan,
+            "prediction_std": np.nan,
+        }
+    )
+
+    out = dict(mc_result)
+    out["hist_bins"] = fallback_bins
+    if "base_params" not in out:
+        out["base_params"] = {
+            "oil": float(controls["oil"]),
+            "key_rate": float(controls["key_rate"]),
+            "usd_rub": float(controls["usd_rub"]),
+            "inflation": float(controls["inflation"]),
+        }
+    if "n_simulations" not in out:
+        out["n_simulations"] = int(total)
+    if "std_map" not in out:
+        out["std_map"] = {}
+    return out
 
 
 def _render_sobol_factor_details(sobol_result: dict[str, Any], selection: Any, detail_key_prefix: str) -> None:
@@ -1991,6 +2065,8 @@ def main() -> None:
         mc_context_key = st.session_state.get("mc_context_key")
         mc_stale = mc_result is not None and mc_context_key != sim_context_key
         if mc_result:
+            mc_result = _ensure_mc_detail_payload(mc_result, controls=controls)
+            st.session_state["mc_result"] = mc_result
             if mc_stale:
                 st.warning("Показан результат Monte Carlo для предыдущих параметров. Нажмите кнопку для пересчета.")
             mc_chart_key = f"mc_hist_{asset_type}_{ticker or 'imoex'}_{regime}"
@@ -2019,6 +2095,10 @@ def main() -> None:
                 selection=mc_selection,
                 detail_key_prefix=f"{mc_chart_key}_{len(mc_result.get('results', []))}",
             )
+            if "hist_bins" in mc_result and isinstance(mc_result["hist_bins"], pd.DataFrame):
+                hist_bins_df = mc_result["hist_bins"]
+                if hist_bins_df["oil_mean"].isna().all():
+                    st.caption("Это результат старого запуска. Для полной детализации по макропараметрам пересчитайте Monte Carlo.")
 
     with tabs[3]:
         st.markdown(
