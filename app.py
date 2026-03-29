@@ -257,6 +257,64 @@ def _correlation_heatmap(df: pd.DataFrame, ticker: str | None) -> go.Figure:
     return fig
 
 
+def _correlation_insights(df: pd.DataFrame, ticker: str | None) -> list[str]:
+    cols = ["imoex_close", "key_rate", "usd_rub", "brent_usd", "inflation"]
+    if ticker:
+        stock_col = f"{ticker.lower()}_close"
+        if stock_col in df.columns:
+            cols.insert(0, stock_col)
+
+    corr = df[cols].corr()
+    pairs: list[tuple[str, str, float]] = []
+    for i, left in enumerate(corr.columns):
+        for j, right in enumerate(corr.columns):
+            if j <= i:
+                continue
+            pairs.append((left, right, float(corr.iloc[i, j])))
+
+    if not pairs:
+        return []
+
+    strongest_abs = sorted(pairs, key=lambda x: abs(x[2]), reverse=True)[:3]
+
+    label_map = {
+        "imoex_close": "IMOEX",
+        "key_rate": "Ключевая ставка",
+        "usd_rub": "USD/RUB",
+        "brent_usd": "Brent",
+        "inflation": "Инфляция",
+    }
+    if ticker:
+        label_map[f"{ticker.lower()}_close"] = ticker.upper()
+
+    insights = []
+    for left, right, value in strongest_abs:
+        direction = "прямая" if value >= 0 else "обратная"
+        strength = "сильная" if abs(value) >= 0.7 else ("умеренная" if abs(value) >= 0.4 else "слабая")
+        insights.append(
+            f"**{label_map.get(left, left)} ↔ {label_map.get(right, right)}**: "
+            f"{value:+.2f} ({strength}, {direction} связь)"
+        )
+    return insights
+
+
+def _scenario_stress_index(controls: dict[str, float], adjustments: dict[str, float]) -> float:
+    # Нормируем базовые факторы к диапазону [0, 1], где 0 — спокойный, 1 — стрессовый.
+    stress_components = [
+        abs(controls["key_rate"] - 10.0) / 20.0,
+        abs(controls["usd_rub"] - 85.0) / 65.0,
+        abs(controls["inflation"] - 4.0) / 16.0,
+        abs(controls["oil"] - 80.0) / 50.0,
+        max(0.0, controls["uncertainty_scale"] - 1.0) / 1.0,
+        max(0.0, -adjustments["market_sentiment"]) / 20.0,
+        max(0.0, -adjustments["liquidity_effect"]) / 15.0,
+        max(0.0, -adjustments["geopolitics_effect"]) / 25.0,
+        max(0.0, -adjustments["regulatory_effect"]) / 20.0,
+    ]
+    raw = float(np.mean([min(max(x, 0.0), 1.0) for x in stress_components]))
+    return min(max(raw * 100.0, 0.0), 100.0)
+
+
 def _gauge_chart(prediction: float, current: float, asset_label: str) -> go.Figure:
     axis_max = max(prediction, current) * 1.35
     axis_min = min(prediction, current) * 0.65
@@ -364,6 +422,21 @@ def main() -> None:
         )
         st.plotly_chart(_historical_chart(plot_df, ticker if asset_type == "stock" else None), use_container_width=True)
         st.plotly_chart(_correlation_heatmap(plot_df, ticker if asset_type == "stock" else None), use_container_width=True)
+        with st.expander("Как читать корреляционную матрицу"):
+            st.markdown(
+                """
+                - Значение корреляции находится в диапазоне от `-1` до `+1`.
+                - Ближе к `+1`: факторы чаще движутся в одном направлении.
+                - Ближе к `-1`: факторы чаще движутся в противоположных направлениях.
+                - Ближе к `0`: явной линейной связи почти нет.
+                - Корреляция не доказывает причинность: это статистическая связь, а не причинно-следственный вывод.
+                """
+            )
+        insights = _correlation_insights(plot_df, ticker if asset_type == "stock" else None)
+        if insights:
+            st.markdown("**Автоинсайты по корреляциям (топ-3):**")
+            for line in insights:
+                st.write(f"- {line}")
 
     with tabs[1]:
         st.markdown(
@@ -390,12 +463,22 @@ def main() -> None:
         delta_abs = prediction - current
         delta_pct = delta_abs / current if current else 0.0
         extra_effect = prediction - raw_prediction
+        stress_index = _scenario_stress_index(controls, adjustments)
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric(f"Текущее значение {asset_label}", f"{current:,.2f}")
         m2.metric(f"Базовый прогноз {asset_label}", f"{raw_prediction:,.2f}")
         m3.metric(f"Итоговый прогноз {asset_label}", f"{prediction:,.2f}", delta=f"{delta_abs:,.2f}")
         m4.metric("Эффект доп. факторов", f"{extra_effect:,.2f}", delta=f"{delta_pct:.2%}")
+
+        st.markdown("**Индекс стресса сценария**")
+        st.progress(int(stress_index))
+        if stress_index >= 70:
+            st.warning(f"Сценарий стрессовый: {stress_index:.0f}/100")
+        elif stress_index >= 40:
+            st.info(f"Сценарий умеренно напряженный: {stress_index:.0f}/100")
+        else:
+            st.success(f"Сценарий ближе к базовому: {stress_index:.0f}/100")
 
         st.plotly_chart(_gauge_chart(prediction, current, asset_label=asset_label), use_container_width=True)
 
