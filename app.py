@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from src.data_loader import load_moex_stock
+from src.data_loader import load_moex_stock, load_moex_tickers
 from src.model import (
     apply_scenario_adjustments,
     explain_imoex_drivers,
@@ -61,7 +61,7 @@ FACTOR_LABELS = {
     "imoex_close": "IMOEX",
 }
 
-POPULAR_TICKERS = ["LKOH", "ROSN", "TATN", "SBER", "GAZP", "NVTK", "GMKN", "MOEX", "VTBR", "T", "YDEX"]
+RESERVE_TICKERS = ["LKOH", "ROSN", "TATN", "SBER", "GAZP", "NVTK", "GMKN", "MOEX", "VTBR", "T", "YDEX"]
 
 
 def _clamp(value: float, config: dict[str, float]) -> float:
@@ -90,6 +90,20 @@ def get_data() -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def get_stock_data(ticker: str) -> pd.DataFrame:
     return load_moex_stock(ticker)
+
+
+@st.cache_data(show_spinner=False)
+def get_moex_ticker_universe() -> pd.DataFrame:
+    df = load_moex_tickers().copy()
+    if "ticker" not in df.columns:
+        raise ValueError("Список тикеров MOEX не содержит колонку 'ticker'")
+    if "shortname" not in df.columns:
+        df["shortname"] = df["ticker"]
+
+    df["ticker"] = df["ticker"].fillna("").astype(str).str.upper().str.strip()
+    df["shortname"] = df["shortname"].fillna(df["ticker"]).astype(str).str.strip()
+    df = df[df["ticker"] != ""].drop_duplicates(subset=["ticker"], keep="first").sort_values("ticker").reset_index(drop=True)
+    return df[["ticker", "shortname"]]
 
 
 @st.cache_resource(show_spinner=False)
@@ -152,11 +166,39 @@ def _apply_preset(preset_name: str, defaults: dict[str, float]) -> None:
         st.session_state[key] = _clamp(float(value), cfg) if cfg else float(value)
 
 
-def _get_portfolio_controls() -> tuple[list[str], dict[str, float]]:
+def _ticker_ui_options() -> tuple[list[str], dict[str, str], bool]:
+    try:
+        universe = get_moex_ticker_universe()
+        ticker_list = universe["ticker"].tolist()
+        if not ticker_list:
+            raise ValueError("Пустой список тикеров")
+        names = {
+            row["ticker"]: row["shortname"]
+            for row in universe.to_dict("records")
+        }
+        return ticker_list, names, False
+    except Exception:
+        names = {ticker: ticker for ticker in RESERVE_TICKERS}
+        return RESERVE_TICKERS.copy(), names, True
+
+
+def _ticker_label(ticker: str, names: dict[str, str]) -> str:
+    shortname = names.get(ticker, "").strip()
+    if shortname and shortname.upper() != ticker.upper():
+        return f"{ticker} — {shortname}"
+    return ticker
+
+
+def _get_portfolio_controls(ticker_options: list[str], names: dict[str, str]) -> tuple[list[str], dict[str, float]]:
+    default_portfolio = [t for t in ("LKOH", "ROSN", "TATN") if t in ticker_options]
+    if len(default_portfolio) < 2:
+        default_portfolio = ticker_options[: min(3, len(ticker_options))]
+
     picked = st.sidebar.multiselect(
         "Тикеры портфеля (2-5)",
-        POPULAR_TICKERS,
-        default=["LKOH", "ROSN", "TATN"],
+        ticker_options,
+        default=default_portfolio,
+        format_func=lambda x: _ticker_label(x, names),
     )
 
     selected = [p.upper().strip() for p in picked][:5]
@@ -205,6 +247,12 @@ def _render_sidebar_controls(
         horizontal=False,
     )
 
+    ticker_options, ticker_names, fallback_used = _ticker_ui_options()
+    if fallback_used:
+        st.sidebar.warning(
+            "Полный список бумаг с MOEX временно недоступен. Используется резервный набор тикеров."
+        )
+
     regime_label = st.sidebar.selectbox("Режим модели", list(REGIME_LABELS.keys()), index=0)
     regime = REGIME_LABELS[regime_label]
 
@@ -216,11 +264,17 @@ def _render_sidebar_controls(
     portfolio_weights: dict[str, float] = {}
 
     if asset_choice == "Акция MOEX":
-        selected = st.sidebar.selectbox("Популярный тикер", POPULAR_TICKERS, index=0)
+        default_ticker = "SBER" if "SBER" in ticker_options else ticker_options[0]
+        selected = st.sidebar.selectbox(
+            "Тикер MOEX",
+            ticker_options,
+            index=ticker_options.index(default_ticker),
+            format_func=lambda x: _ticker_label(x, ticker_names),
+        )
         custom = st.sidebar.text_input("Или введите тикер вручную", value=selected)
         ticker = (custom or selected).upper().strip()
     elif asset_choice == "Портфель MOEX":
-        portfolio_tickers, portfolio_weights = _get_portfolio_controls()
+        portfolio_tickers, portfolio_weights = _get_portfolio_controls(ticker_options, ticker_names)
 
     b1, b2, b3 = st.sidebar.columns(3)
     if b1.button("Базовый", use_container_width=True):

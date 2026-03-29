@@ -245,6 +245,62 @@ def load_moex_index() -> pd.DataFrame:
         return _safe_read_csv(imoex_file)
 
 
+def _fetch_moex_tickers() -> pd.DataFrame:
+    url = f"{MOEX_BASE_URL}/engines/stock/markets/shares/boards/TQBR/securities.json"
+    params = {
+        "iss.meta": "off",
+        "securities.columns": "SECID,SHORTNAME",
+    }
+    response = _request_get(url, params=params)
+    payload = response.json().get("securities", {})
+
+    columns = payload.get("columns", [])
+    data = payload.get("data", [])
+    rows = [dict(zip(columns, item)) for item in data]
+
+    if not rows:
+        raise ValueError("MOEX returned no securities for TQBR board")
+
+    raw = pd.DataFrame(rows)
+    if "SECID" not in raw.columns:
+        raise ValueError("MOEX securities payload has no SECID column")
+
+    tickers = raw["SECID"].fillna("").astype(str).str.upper().str.strip()
+    names = raw["SHORTNAME"].fillna("").astype(str).str.strip() if "SHORTNAME" in raw.columns else tickers
+
+    universe = pd.DataFrame({"ticker": tickers, "shortname": names})
+    universe = universe[universe["ticker"].str.fullmatch(r"[A-Z0-9]+", na=False)]
+    universe = universe.drop_duplicates(subset=["ticker"], keep="first").sort_values("ticker").reset_index(drop=True)
+    universe["shortname"] = universe["shortname"].where(universe["shortname"] != "", universe["ticker"])
+
+    if universe.empty:
+        raise ValueError("Filtered MOEX ticker universe is empty")
+    return universe[["ticker", "shortname"]]
+
+
+def load_moex_tickers() -> pd.DataFrame:
+    """Load MOEX TQBR ticker universe with short names."""
+    output_file = RAW_DIR / "moex_tickers.csv"
+
+    try:
+        universe = _fetch_moex_tickers()
+        _save_csv(universe, output_file.name)
+        return universe
+    except Exception as exc:  # pragma: no cover - runtime/network variability
+        LOGGER.exception("Failed to load MOEX tickers from API: %s", exc)
+        fallback = _safe_read_csv(output_file)
+        if "ticker" not in fallback.columns:
+            raise ValueError("Fallback CSV has no 'ticker' column")
+        if "shortname" not in fallback.columns:
+            fallback["shortname"] = fallback["ticker"]
+
+        fallback["ticker"] = fallback["ticker"].fillna("").astype(str).str.upper().str.strip()
+        fallback["shortname"] = fallback["shortname"].fillna(fallback["ticker"]).astype(str).str.strip()
+        fallback = fallback[fallback["ticker"].str.fullmatch(r"[A-Z0-9]+", na=False)]
+        fallback = fallback.drop_duplicates(subset=["ticker"], keep="first").sort_values("ticker").reset_index(drop=True)
+        return fallback[["ticker", "shortname"]]
+
+
 def load_moex_stock(ticker: str) -> pd.DataFrame:
     """Load monthly close for a selected MOEX stock ticker."""
     start_ts, end_ts = _date_window(years=5)
