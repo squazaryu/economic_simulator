@@ -10,11 +10,6 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-try:
-    from streamlit_plotly_events import plotly_events
-except Exception:
-    plotly_events = None
-
 from src.data_loader import load_moex_stock, load_moex_tickers
 from src.interpreter import interpret_monte_carlo_bin, interpret_sobol_factor
 from src.model import (
@@ -2211,25 +2206,16 @@ def main() -> None:
             if mc_stale:
                 st.warning("Показан результат Monte Carlo для предыдущих параметров. Нажмите кнопку для пересчета.")
             mc_chart_key = f"mc_hist_{asset_type}_{ticker or 'imoex'}_{regime}"
-            if plotly_events is not None:
-                mc_selection = plotly_events(
-                    mc_result["figure"],
-                    click_event=True,
-                    select_event=False,
-                    hover_event=False,
-                    key=f"{mc_chart_key}_click",
-                )
-                mc_selection = {"points": mc_selection}
-                st.caption("Клик по столбцу синхронизирует интерпретатор (режим click-event).")
-            else:
-                mc_selection = st.plotly_chart(
-                    mc_result["figure"],
-                    use_container_width=True,
-                    key=mc_chart_key,
-                    on_select="rerun",
-                    selection_mode=("points",),
-                )
-                st.caption("Если клик не синхронизирует интерпретатор, используйте список диапазонов ниже.")
+            mc_fig = go.Figure(mc_result["figure"])
+            mc_fig.update_layout(clickmode="event+select")
+            mc_selection = st.plotly_chart(
+                mc_fig,
+                use_container_width=True,
+                key=mc_chart_key,
+                on_select="rerun",
+                selection_mode=("points", "box", "lasso"),
+            )
+            st.caption("Если клик не синхронизирует интерпретатор, используйте список диапазонов ниже.")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("P5", f"{mc_result['var_5']:.1f}")
             c2.metric("P50", f"{mc_result['p50']:.1f}")
@@ -2291,25 +2277,16 @@ def main() -> None:
             if sobol_stale:
                 st.warning("Показан результат Sobol для предыдущих параметров. Нажмите кнопку для пересчета.")
             sobol_chart_key = f"sobol_{asset_type}_{ticker or 'imoex'}_{regime}"
-            if plotly_events is not None:
-                sobol_selection = plotly_events(
-                    sobol_result["figure"],
-                    click_event=True,
-                    select_event=False,
-                    hover_event=False,
-                    key=f"{sobol_chart_key}_click",
-                )
-                sobol_selection = {"points": sobol_selection}
-                st.caption("Клик по столбцу синхронизирует интерпретатор (режим click-event).")
-            else:
-                sobol_selection = st.plotly_chart(
-                    sobol_result["figure"],
-                    use_container_width=True,
-                    key=sobol_chart_key,
-                    on_select="rerun",
-                    selection_mode=("points",),
-                )
-                st.caption("Если клик не синхронизирует интерпретатор, используйте выбор фактора ниже.")
+            sobol_fig = go.Figure(sobol_result["figure"])
+            sobol_fig.update_layout(clickmode="event+select")
+            sobol_selection = st.plotly_chart(
+                sobol_fig,
+                use_container_width=True,
+                key=sobol_chart_key,
+                on_select="rerun",
+                selection_mode=("points", "box", "lasso"),
+            )
+            st.caption("Если клик не синхронизирует интерпретатор, используйте выбор фактора ниже.")
             st.info(
                 "Наибольшее влияние оказывает "
                 f"`{sobol_result['top_factor']}` (S1={sobol_result['top_s1']:.2f})"

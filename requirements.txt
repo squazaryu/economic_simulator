@@ -9,4 +9,3 @@ aiomoex
 cbrapi
 joblib
 requests
-streamlit-plotly-events
