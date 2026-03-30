@@ -1246,21 +1246,25 @@ def _plotly_selected_points(selection: Any) -> list[dict[str, Any]]:
 def _selected_point_index(points: list[dict[str, Any]]) -> int | None:
     if not points:
         return None
-    point = points[0]
-    custom = point.get("customdata")
-    if isinstance(custom, (list, tuple)) and custom:
-        try:
-            return int(custom[0])
-        except Exception:
-            pass
-    for key in ("point_index", "pointNumber", "point_number", "pointIndex"):
-        raw = point.get(key)
-        if raw is None:
-            continue
-        try:
-            return int(raw)
-        except Exception:
-            continue
+    # Берем последний элемент, чтобы при множественном выделении учитывать
+    # последний клик пользователя, а не первую выбранную точку.
+    for point in reversed(points):
+        custom = point.get("customdata")
+        if isinstance(custom, np.ndarray):
+            custom = custom.tolist()
+        if isinstance(custom, (list, tuple)) and custom:
+            try:
+                return int(custom[0])
+            except Exception:
+                pass
+        for key in ("point_index", "pointNumber", "point_number", "pointIndex"):
+            raw = point.get(key)
+            if raw is None:
+                continue
+            try:
+                return int(raw)
+            except Exception:
+                continue
     return None
 
 
@@ -1297,6 +1301,14 @@ def _render_monte_carlo_bin_details(mc_result: dict[str, Any], selection: Any, d
     row = bins.iloc[selected_idx]
     selected_range = f"{float(row['left']):.1f} .. {float(row['right']):.1f}"
     st.success(f"Выбран столбец Monte Carlo: #{selected_idx + 1} ({selected_range})")
+    st.caption("Интерпретатор обновляется при каждом новом клике по столбцу или ручном выборе диапазона.")
+
+    interpretation = interpret_monte_carlo_bin(mc_result, row.to_dict())
+    st.markdown("**Интерпретатор результата**")
+    st.info(interpretation["headline"])
+    st.write(interpretation["summary"])
+    for bullet in interpretation["bullets"]:
+        st.write(f"- {bullet}")
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Диапазон", f"{float(row['left']):.1f} .. {float(row['right']):.1f}")
@@ -1363,13 +1375,6 @@ def _render_monte_carlo_bin_details(mc_result: dict[str, Any], selection: Any, d
     )
     st.markdown("**Логика расчета (пошагово)**")
     st.dataframe(logic_df, use_container_width=True, hide_index=True)
-
-    interpretation = interpret_monte_carlo_bin(mc_result, row.to_dict())
-    st.markdown("**Интерпретатор результата**")
-    st.info(interpretation["headline"])
-    st.write(interpretation["summary"])
-    for bullet in interpretation["bullets"]:
-        st.write(f"- {bullet}")
 
 
 def _ensure_mc_detail_payload(mc_result: dict[str, Any], controls: dict[str, float]) -> dict[str, Any]:
@@ -1449,6 +1454,7 @@ def _render_sobol_factor_details(sobol_result: dict[str, Any], selection: Any, d
     selected_idx = labels.index(selected_label)
     row = sobol_df.iloc[selected_idx]
     st.success(f"Выбран фактор Sobol: {selected_label}")
+    st.caption("Интерпретатор обновляется при каждом новом клике по столбцу или ручном выборе фактора.")
 
     factor = str(row["factor"])
     bounds_map = {
@@ -1471,6 +1477,13 @@ def _render_sobol_factor_details(sobol_result: dict[str, Any], selection: Any, d
     c2.metric("S1 ± conf", f"{s1_conf:.3f}")
     c3.metric("Диапазон фактора", f"{low:.2f} .. {high:.2f}")
     c4.metric("Направление", sign_text)
+
+    interpretation = interpret_sobol_factor(sobol_result, row.to_dict())
+    st.markdown("**Интерпретатор результата**")
+    st.info(interpretation["headline"])
+    st.write(interpretation["summary"])
+    for bullet in interpretation["bullets"]:
+        st.write(f"- {bullet}")
 
     st.markdown(
         f"""
@@ -1497,13 +1510,6 @@ def _render_sobol_factor_details(sobol_result: dict[str, Any], selection: Any, d
     )
     st.markdown("**Логика расчета (пошагово)**")
     st.dataframe(logic_df, use_container_width=True, hide_index=True)
-
-    interpretation = interpret_sobol_factor(sobol_result, row.to_dict())
-    st.markdown("**Интерпретатор результата**")
-    st.info(interpretation["headline"])
-    st.write(interpretation["summary"])
-    for bullet in interpretation["bullets"]:
-        st.write(f"- {bullet}")
 
 
 def main() -> None:
