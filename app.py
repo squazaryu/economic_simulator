@@ -11,6 +11,7 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from src.data_loader import load_moex_stock, load_moex_tickers
+from src.interpreter import interpret_monte_carlo_bin, interpret_sobol_factor
 from src.model import (
     apply_scenario_adjustments,
     explain_imoex_drivers,
@@ -1363,6 +1364,13 @@ def _render_monte_carlo_bin_details(mc_result: dict[str, Any], selection: Any, d
     st.markdown("**Логика расчета (пошагово)**")
     st.dataframe(logic_df, use_container_width=True, hide_index=True)
 
+    interpretation = interpret_monte_carlo_bin(mc_result, row.to_dict())
+    st.markdown("**Интерпретатор результата**")
+    st.info(interpretation["headline"])
+    st.write(interpretation["summary"])
+    for bullet in interpretation["bullets"]:
+        st.write(f"- {bullet}")
+
 
 def _ensure_mc_detail_payload(mc_result: dict[str, Any], controls: dict[str, float]) -> dict[str, Any]:
     if not isinstance(mc_result, dict):
@@ -1489,6 +1497,13 @@ def _render_sobol_factor_details(sobol_result: dict[str, Any], selection: Any, d
     )
     st.markdown("**Логика расчета (пошагово)**")
     st.dataframe(logic_df, use_container_width=True, hide_index=True)
+
+    interpretation = interpret_sobol_factor(sobol_result, row.to_dict())
+    st.markdown("**Интерпретатор результата**")
+    st.info(interpretation["headline"])
+    st.write(interpretation["summary"])
+    for bullet in interpretation["bullets"]:
+        st.write(f"- {bullet}")
 
 
 def main() -> None:
