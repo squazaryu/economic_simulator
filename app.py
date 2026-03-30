@@ -10,6 +10,11 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+try:
+    from streamlit_plotly_events import plotly_events
+except Exception:
+    plotly_events = None
+
 from src.data_loader import load_moex_stock, load_moex_tickers
 from src.interpreter import interpret_monte_carlo_bin, interpret_sobol_factor
 from src.model import (
@@ -1185,6 +1190,17 @@ def _resize_compare_editor_source(
 def _plotly_selected_points(selection: Any) -> list[dict[str, Any]]:
     if selection is None:
         return []
+    if isinstance(selection, list):
+        normalized: list[dict[str, Any]] = []
+        for p in selection:
+            if isinstance(p, dict):
+                normalized.append(p)
+                continue
+            try:
+                normalized.append(dict(p))
+            except Exception:
+                pass
+        return normalized
 
     candidates: list[Any] = []
     if isinstance(selection, dict):
@@ -1243,6 +1259,33 @@ def _plotly_selected_points(selection: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _selected_point_x(points: list[dict[str, Any]]) -> float | None:
+    if not points:
+        return None
+    for point in reversed(points):
+        raw = point.get("x")
+        if raw is None:
+            continue
+        try:
+            return float(raw)
+        except Exception:
+            continue
+    return None
+
+
+def _selected_point_y_label(points: list[dict[str, Any]]) -> str | None:
+    if not points:
+        return None
+    for point in reversed(points):
+        raw = point.get("y")
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if text:
+            return text
+    return None
+
+
 def _selected_point_index(points: list[dict[str, Any]]) -> int | None:
     if not points:
         return None
@@ -1257,6 +1300,17 @@ def _selected_point_index(points: list[dict[str, Any]]) -> int | None:
                 return int(custom[0])
             except Exception:
                 pass
+        for key in ("point_indices", "pointIndices", "point_numbers", "pointNumbers"):
+            raw = point.get(key)
+            if raw is None:
+                continue
+            if isinstance(raw, np.ndarray):
+                raw = raw.tolist()
+            if isinstance(raw, (list, tuple)) and len(raw) > 0:
+                try:
+                    return int(raw[-1])
+                except Exception:
+                    continue
         for key in ("point_index", "pointNumber", "point_number", "pointIndex"):
             raw = point.get(key)
             if raw is None:
@@ -1275,6 +1329,12 @@ def _render_monte_carlo_bin_details(mc_result: dict[str, Any], selection: Any, d
 
     points = _plotly_selected_points(selection)
     clicked_idx = _selected_point_index(points)
+    if clicked_idx is None and points:
+        clicked_x = _selected_point_x(points)
+        if clicked_x is not None:
+            centers = pd.to_numeric(bins["center"], errors="coerce").to_numpy(dtype=float)
+            if centers.size > 0 and np.isfinite(centers).any():
+                clicked_idx = int(np.nanargmin(np.abs(centers - clicked_x)))
     if clicked_idx is not None and (clicked_idx < 0 or clicked_idx >= len(bins)):
         clicked_idx = None
 
@@ -1437,6 +1497,17 @@ def _render_sobol_factor_details(sobol_result: dict[str, Any], selection: Any, d
 
     points = _plotly_selected_points(selection)
     clicked_idx = _selected_point_index(points)
+    if clicked_idx is None and points:
+        clicked_y = _selected_point_y_label(points)
+        if clicked_y:
+            y_to_idx = {str(label): i for i, label in enumerate(labels)}
+            clicked_idx = y_to_idx.get(clicked_y)
+    if clicked_idx is None and points:
+        clicked_x = _selected_point_x(points)
+        if clicked_x is not None:
+            xvals = pd.to_numeric(sobol_df["S1"], errors="coerce").to_numpy(dtype=float)
+            if xvals.size > 0 and np.isfinite(xvals).any():
+                clicked_idx = int(np.nanargmin(np.abs(xvals - clicked_x)))
     if clicked_idx is not None and (clicked_idx < 0 or clicked_idx >= len(sobol_df)):
         clicked_idx = None
 
@@ -2140,13 +2211,25 @@ def main() -> None:
             if mc_stale:
                 st.warning("Показан результат Monte Carlo для предыдущих параметров. Нажмите кнопку для пересчета.")
             mc_chart_key = f"mc_hist_{asset_type}_{ticker or 'imoex'}_{regime}"
-            mc_selection = st.plotly_chart(
-                mc_result["figure"],
-                use_container_width=True,
-                key=mc_chart_key,
-                on_select="rerun",
-                selection_mode=("points",),
-            )
+            if plotly_events is not None:
+                mc_selection = plotly_events(
+                    mc_result["figure"],
+                    click_event=True,
+                    select_event=False,
+                    hover_event=False,
+                    key=f"{mc_chart_key}_click",
+                )
+                mc_selection = {"points": mc_selection}
+                st.caption("Клик по столбцу синхронизирует интерпретатор (режим click-event).")
+            else:
+                mc_selection = st.plotly_chart(
+                    mc_result["figure"],
+                    use_container_width=True,
+                    key=mc_chart_key,
+                    on_select="rerun",
+                    selection_mode=("points",),
+                )
+                st.caption("Если клик не синхронизирует интерпретатор, используйте список диапазонов ниже.")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("P5", f"{mc_result['var_5']:.1f}")
             c2.metric("P50", f"{mc_result['p50']:.1f}")
@@ -2208,13 +2291,25 @@ def main() -> None:
             if sobol_stale:
                 st.warning("Показан результат Sobol для предыдущих параметров. Нажмите кнопку для пересчета.")
             sobol_chart_key = f"sobol_{asset_type}_{ticker or 'imoex'}_{regime}"
-            sobol_selection = st.plotly_chart(
-                sobol_result["figure"],
-                use_container_width=True,
-                key=sobol_chart_key,
-                on_select="rerun",
-                selection_mode=("points",),
-            )
+            if plotly_events is not None:
+                sobol_selection = plotly_events(
+                    sobol_result["figure"],
+                    click_event=True,
+                    select_event=False,
+                    hover_event=False,
+                    key=f"{sobol_chart_key}_click",
+                )
+                sobol_selection = {"points": sobol_selection}
+                st.caption("Клик по столбцу синхронизирует интерпретатор (режим click-event).")
+            else:
+                sobol_selection = st.plotly_chart(
+                    sobol_result["figure"],
+                    use_container_width=True,
+                    key=sobol_chart_key,
+                    on_select="rerun",
+                    selection_mode=("points",),
+                )
+                st.caption("Если клик не синхронизирует интерпретатор, используйте выбор фактора ниже.")
             st.info(
                 "Наибольшее влияние оказывает "
                 f"`{sobol_result['top_factor']}` (S1={sobol_result['top_s1']:.2f})"
