@@ -74,6 +74,7 @@ def run_sobol_service(
     regime: str,
     portfolio_tickers: list[str],
     portfolio_weights: dict[str, float] | None,
+    random_seed: int = 42,
 ) -> dict[str, Any]:
     weights_list = [portfolio_weights[t] for t in portfolio_tickers] if portfolio_weights else None
     return run_sobol_engine(
@@ -83,5 +84,5 @@ def run_sobol_service(
         regime=regime,
         portfolio_tickers=portfolio_tickers,
         portfolio_weights=weights_list,
+        random_seed=int(random_seed),
     )
-

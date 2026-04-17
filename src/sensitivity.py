@@ -187,13 +187,26 @@ def run_sobol_sensitivity(
     regime: str = "all",
     portfolio_tickers: list[str] | None = None,
     portfolio_weights: list[float] | None = None,
+    random_seed: int = 42,
 ) -> dict[str, Any]:
     """Выполнить Sobol-анализ для IMOEX, акции или портфеля."""
     if n_samples < 128:
         raise ValueError("n_samples должен быть >= 128 для устойчивой оценки")
 
     problem = _build_problem_definition()
-    sample_matrix = sobol_sampler.sample(problem, n_samples, calc_second_order=False)
+    # Делаем анализ детерминированным для одинакового набора входов:
+    # повторный запуск без изменения параметров должен давать тот же результат.
+    try:
+        sample_matrix = sobol_sampler.sample(
+            problem,
+            n_samples,
+            calc_second_order=False,
+            seed=int(random_seed),
+        )
+    except TypeError:
+        # Fallback для старых версий SALib, где аргумент seed недоступен.
+        np.random.seed(int(random_seed))
+        sample_matrix = sobol_sampler.sample(problem, n_samples, calc_second_order=False)
 
     sampled = pd.DataFrame(sample_matrix, columns=problem["names"])
     y_pred = _predict_chain(
@@ -247,6 +260,7 @@ def run_sobol_sensitivity(
         "n_samples": int(n_samples),
         "n_evaluations": int(len(sampled)),
         "y_variance": float(np.var(y_pred, ddof=1)),
+        "random_seed": int(random_seed),
     }
 
 

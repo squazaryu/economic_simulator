@@ -2364,6 +2364,7 @@ def main() -> None:
                         regime=regime,
                         portfolio_tickers=portfolio_tickers,
                         portfolio_weights=portfolio_weights,
+                        random_seed=42,
                     )
                     st.session_state["sobol_result"] = sobol_result
                     st.session_state["sobol_context_key"] = sim_context_key
@@ -2394,6 +2395,10 @@ def main() -> None:
             st.caption(
                 "Дополнительные сценарные поправки (сентимент/ликвидность/геополитика/регуляторика) "
                 "не входят в Sobol-разложение, так как применяются пост-коррекцией к прогнозу."
+            )
+            st.caption(
+                "Sobol считается отдельно и не зависит от выбранного бина Monte Carlo. "
+                "При одинаковых параметрах результат детерминирован (фиксированный seed)."
             )
             st.caption(f"Объем выборки Sobol: {256 if cpu_saver else 512}")
             _render_sobol_factor_details(

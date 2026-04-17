@@ -39,6 +39,7 @@ def run_sobol_engine(
     regime: str,
     portfolio_tickers: list[str] | None,
     portfolio_weights: list[float] | None,
+    random_seed: int = 42,
 ) -> dict[str, Any]:
     return run_sobol_sensitivity(
         n_samples=n_samples,
@@ -47,5 +48,5 @@ def run_sobol_engine(
         regime=regime,
         portfolio_tickers=portfolio_tickers,
         portfolio_weights=portfolio_weights,
+        random_seed=random_seed,
     )
-
