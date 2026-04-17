@@ -15,7 +15,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 from src.interpreter import interpret_monte_carlo_bin, interpret_sobol_factor
-from src.model import predict_scenario, predict_stock_scenario
+from src.model import (
+    explain_imoex_drivers,
+    explain_stock_drivers,
+    predict_scenario,
+    predict_stock_scenario,
+)
 from src.service import (
     get_moex_ticker_universe_service,
     get_processed_dataset_service,
@@ -30,6 +35,14 @@ REGIME_OPTIONS = [
     {"label": "До февраля 2022", "value": "pre_2022"},
     {"label": "С февраля 2022", "value": "post_2022"},
 ]
+
+FACTOR_LABELS = {
+    "brent_usd": "Нефть Brent",
+    "key_rate": "Ключевая ставка",
+    "usd_rub": "USD/RUB",
+    "inflation": "Инфляция",
+    "imoex_close": "IMOEX",
+}
 
 
 def _safe_float(x: Any, default: float = 0.0) -> float:
@@ -168,6 +181,50 @@ def _predict_portfolio_snapshot(
         pred += w * float(p)
         cur += w * c
     return float(pred), float(cur)
+
+
+def _metric_cards(current: float, base: float, final: float, label: str) -> html.Div:
+    delta = final - current
+    delta_pct = delta / current if current else 0.0
+    return html.Div(
+        [
+            html.Div(f"Актив: {label}", className="hint"),
+            html.Div(
+                [
+                    html.Div([html.Div("Текущее"), html.H4(f"{current:,.2f}")], className="metric-card"),
+                    html.Div([html.Div("Базовый прогноз"), html.H4(f"{base:,.2f}")], className="metric-card"),
+                    html.Div([html.Div("Итоговый прогноз"), html.H4(f"{final:,.2f}")], className="metric-card"),
+                    html.Div([html.Div("Δ к текущему"), html.H4(f"{delta:+,.2f} ({delta_pct:+.2%})")], className="metric-card"),
+                ],
+                className="metric-grid",
+            ),
+        ]
+    )
+
+
+def _driver_table(df: pd.DataFrame) -> html.Table:
+    if df.empty:
+        return html.Table()
+    top = df.head(5).copy()
+    top["factor_label"] = top["factor"].map(FACTOR_LABELS).fillna(top["factor"])
+    rows = [
+        html.Tr(
+            [
+                html.Td(str(r["factor_label"])),
+                html.Td(f"{float(r['coef']):+.3f}"),
+                html.Td(f"{float(r['delta']):+.3f}"),
+                html.Td(f"{float(r['contribution']):+.2f}"),
+            ]
+        )
+        for _, r in top.iterrows()
+    ]
+    return html.Table(
+        [
+            html.Thead(html.Tr([html.Th("Фактор"), html.Th("Коэф."), html.Th("Δ от среднего"), html.Th("Вклад")])),
+            html.Tbody(rows),
+        ],
+        className="driver-table",
+    )
 
 
 def build_layout(df: pd.DataFrame) -> html.Div:
@@ -362,9 +419,28 @@ def run_scenario_cb(
     df = _load_dataset()
     try:
         if asset_type == "stock":
+            base_imoex = predict_scenario(oil, key_rate, usd_rub, inflation, regime=regime)
             pred = predict_stock_scenario(ticker, oil, key_rate, usd_rub, inflation, regime=regime)
             cur = _asset_current(df, "stock", ticker)
             label = f"Акция {ticker}"
+            drivers = explain_stock_drivers(
+                ticker=ticker,
+                oil=oil,
+                key_rate=key_rate,
+                usd_rub=usd_rub,
+                inflation=inflation,
+                imoex_value=base_imoex,
+                regime=regime,
+            )
+            return html.Div(
+                [
+                    _metric_cards(cur, pred, pred, label),
+                    html.P("Режим акции: прогноз учитывает макрофакторы и связку с прогнозным уровнем IMOEX."),
+                    html.P(f"Промежуточный прогноз IMOEX для акции: {base_imoex:,.2f}."),
+                    html.H5("Драйверы прогноза акции"),
+                    _driver_table(drivers),
+                ]
+            )
         elif asset_type == "portfolio":
             tickers = [str(t).upper().strip() for t in (portfolio_tickers or []) if str(t).strip()]
             weights = _parse_portfolio_weights(portfolio_weights_text, len(tickers))
@@ -378,20 +454,62 @@ def run_scenario_cb(
                 regime=regime,
             )
             label = f"Портфель ({', '.join(tickers[:4])})"
+            rows = []
+            for t, w in zip(tickers, weights):
+                px_pred = predict_stock_scenario(t, oil, key_rate, usd_rub, inflation, regime=regime)
+                s = get_stock_history_service(t)
+                col = f"{t.lower()}_close"
+                px_cur = float(pd.to_numeric(s[col], errors="coerce").dropna().iloc[-1]) if col in s.columns else float("nan")
+                delta_pct = (px_pred / px_cur - 1.0) if np.isfinite(px_cur) and px_cur else float("nan")
+                rows.append({"ticker": t, "weight": w, "cur": px_cur, "pred": px_pred, "delta_pct": delta_pct})
+            table_rows = [
+                html.Tr(
+                    [
+                        html.Td(r["ticker"]),
+                        html.Td(f"{r['weight']:.1%}"),
+                        html.Td(f"{r['cur']:,.2f}" if np.isfinite(r["cur"]) else "н/д"),
+                        html.Td(f"{r['pred']:,.2f}"),
+                        html.Td(f"{r['delta_pct']:+.2%}" if np.isfinite(r["delta_pct"]) else "н/д"),
+                    ]
+                )
+                for r in rows
+            ]
+            return html.Div(
+                [
+                    _metric_cards(cur, pred, pred, label),
+                    html.P("Режим портфеля: итоговый прогноз — взвешенная сумма прогнозов выбранных бумаг."),
+                    html.Table(
+                        [
+                            html.Thead(
+                                html.Tr([html.Th("Тикер"), html.Th("Вес"), html.Th("Текущая цена"), html.Th("Прогноз"), html.Th("Δ %")])
+                            ),
+                            html.Tbody(table_rows),
+                        ],
+                        className="driver-table",
+                    ),
+                ]
+            )
         else:
             pred = predict_scenario(oil, key_rate, usd_rub, inflation, regime=regime)
             cur = _asset_current(df, "imoex", ticker)
             label = "IMOEX"
+            drivers = explain_imoex_drivers(
+                oil=oil,
+                key_rate=key_rate,
+                usd_rub=usd_rub,
+                inflation=inflation,
+                regime=regime,
+            )
+            return html.Div(
+                [
+                    _metric_cards(cur, pred, pred, label),
+                    html.P("Режим IMOEX: прогноз строится напрямую по макрофакторам модели."),
+                    html.H5("Драйверы прогноза IMOEX"),
+                    _driver_table(drivers),
+                ]
+            )
     except Exception as exc:
         return html.Div([html.B("Ошибка расчета сценария"), html.Div(str(exc))])
-    delta = pred - cur
-    pct = delta / cur if cur else 0.0
-    return html.Div(
-        [
-            html.H4(f"Прогноз {label}: {pred:,.2f}"),
-            html.Div(f"Текущее: {cur:,.2f} | Δ: {delta:,.2f} ({pct:+.2%})"),
-        ]
-    )
 
 
 @callback(
