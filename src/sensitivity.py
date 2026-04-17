@@ -161,11 +161,11 @@ def _impact_sign_map_from_samples(sampled: pd.DataFrame, y_pred: np.ndarray) -> 
 def build_tornado_chart(sobol_df: pd.DataFrame, asset_label: str) -> go.Figure:
     fig = go.Figure(
         go.Bar(
-            x=sobol_df["S1"],
-            y=sobol_df["factor_label"],
+            x=sobol_df["S1"].astype(float).tolist(),
+            y=sobol_df["factor_label"].astype(str).tolist(),
             orientation="h",
-            marker_color=sobol_df["color"],
-            text=[f"{x:.3f}" for x in sobol_df["S1"]],
+            marker_color=sobol_df["color"].astype(str).tolist(),
+            text=[f"{x:.3f}" for x in sobol_df["S1"].astype(float).tolist()],
             textposition="auto",
         )
     )

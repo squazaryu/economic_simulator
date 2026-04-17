@@ -141,19 +141,21 @@ def _build_hist_bins(
 
 
 def build_monte_carlo_histogram(bin_df: pd.DataFrame, p5: float, p95: float, label: str) -> go.Figure:
+    # Для совместимости с streamlit-plotly-events передаем обычные Python-списки,
+    # а не pandas/numpy объекты.
     customdata = np.column_stack(
         [
-            bin_df["bin_index"].to_numpy(),
-            bin_df["left"].to_numpy(),
-            bin_df["right"].to_numpy(),
-            bin_df["probability"].to_numpy(),
+            bin_df["bin_index"].to_numpy(dtype=float),
+            bin_df["left"].to_numpy(dtype=float),
+            bin_df["right"].to_numpy(dtype=float),
+            bin_df["probability"].to_numpy(dtype=float),
         ]
-    )
+    ).tolist()
     fig = go.Figure()
     fig.add_trace(
         go.Bar(
-            x=bin_df["center"],
-            y=bin_df["count"],
+            x=bin_df["center"].astype(float).tolist(),
+            y=bin_df["count"].astype(float).tolist(),
             name=f"Распределение {label}",
             marker=dict(color="#2b8cbe"),
             opacity=0.85,
