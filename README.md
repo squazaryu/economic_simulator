@@ -85,6 +85,19 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+### Альтернативный запуск (Dash-версия, стабильный state/callback)
+
+```bash
+cd economic_simulator
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python dash_app.py
+```
+
+Откроется на `http://localhost:8050`.
+Dash-версия использует тот же `src/service.py` и `src/engine.py`, поэтому математическая логика и данные остаются общими.
+
 ## Архитектура
 
 Проект приведен к цепочке:

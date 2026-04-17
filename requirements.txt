@@ -11,3 +11,4 @@ joblib==1.5.3
 requests==2.33.0
 pytest==8.4.2
 streamlit-plotly-events==0.0.6
+dash==2.18.2
