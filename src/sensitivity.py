@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from SALib.analyze import sobol
-from SALib.sample import saltelli
+from SALib.sample import sobol as sobol_sampler
 
 from src.data_loader import load_moex_stock
 from src.model import load_model_artifact, load_stock_model_artifact
@@ -193,7 +193,7 @@ def run_sobol_sensitivity(
         raise ValueError("n_samples должен быть >= 128 для устойчивой оценки")
 
     problem = _build_problem_definition()
-    sample_matrix = saltelli.sample(problem, n_samples, calc_second_order=False)
+    sample_matrix = sobol_sampler.sample(problem, n_samples, calc_second_order=False)
 
     sampled = pd.DataFrame(sample_matrix, columns=problem["names"])
     y_pred = _predict_chain(
