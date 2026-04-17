@@ -1361,6 +1361,65 @@ def _render_monte_carlo_bin_details(mc_result: dict[str, Any], selection: Any, d
     st.success(f"Выбран столбец Monte Carlo: #{selected_idx + 1} ({selected_range})")
     st.caption("Интерпретатор обновляется при каждом новом клике по столбцу или ручном выборе диапазона.")
 
+    base = mc_result.get("base_params", {})
+    std_map = mc_result.get("std_map", {})
+    n_sim = int(mc_result.get("n_simulations", 0))
+    left = float(row["left"])
+    right = float(row["right"])
+    count = int(row["count"])
+    prob = float(row["probability"])
+    pred_mean = float(row["prediction_mean"]) if np.isfinite(float(row["prediction_mean"])) else (left + right) / 2.0
+    current_level = float(mc_result.get("current_level", np.nan))
+    rel_to_current = (pred_mean / current_level - 1.0) if np.isfinite(current_level) and current_level != 0 else float("nan")
+
+    def _z(bin_mean: float, base_val: float, sigma: float) -> float:
+        if not np.isfinite(sigma) or sigma <= 0:
+            return float("nan")
+        return (bin_mean - base_val) / sigma
+
+    oil_z = _z(float(row["oil_mean"]), float(base.get("oil", np.nan)), float(std_map.get("oil", np.nan)))
+    key_rate_z = _z(
+        float(row["key_rate_mean"]),
+        float(base.get("key_rate", np.nan)),
+        float(std_map.get("key_rate", np.nan)),
+    )
+    usd_rub_z = _z(float(row["usd_rub_mean"]), float(base.get("usd_rub", np.nan)), float(std_map.get("usd_rub", np.nan)))
+    inflation_z = _z(
+        float(row["inflation_mean"]),
+        float(base.get("inflation", np.nan)),
+        float(std_map.get("inflation", np.nan)),
+    )
+
+    st.markdown("**Техпаспорт расчёта выбранного столбца**")
+    st.info(
+        f"Шаг 1: генерируем {n_sim} сценариев X~N(μ,σ) вокруг базы. "
+        f"Шаг 2: считаем прогноз модели по каждому сценарию. "
+        f"Шаг 3: отбираем сценарии, где прогноз попал в бин [{left:.1f}; {right:.1f})."
+    )
+    st.code(
+        "\n".join(
+            [
+                "Формулы:",
+                "1) Xi ~ N(μi, σi)",
+                "2) Y_raw = model(X)",
+                "3) Y = Y_raw * (1 + adj/100)",
+                "4) P(bin) = count(bin) / N",
+                "",
+                "Подстановка для выбранного столбца:",
+                f"P(bin) = {count} / {n_sim} = {prob:.2%}",
+                f"E[Y | bin] = {pred_mean:.1f}",
+                f"Δ к текущему уровню = {rel_to_current:+.2%}" if np.isfinite(rel_to_current) else "Δ к текущему уровню = н/д",
+                "",
+                "Положение средних значений факторов в бине (z-оценка):",
+                f"z_oil = {oil_z:+.2f}" if np.isfinite(oil_z) else "z_oil = н/д",
+                f"z_key_rate = {key_rate_z:+.2f}" if np.isfinite(key_rate_z) else "z_key_rate = н/д",
+                f"z_usd_rub = {usd_rub_z:+.2f}" if np.isfinite(usd_rub_z) else "z_usd_rub = н/д",
+                f"z_inflation = {inflation_z:+.2f}" if np.isfinite(inflation_z) else "z_inflation = н/д",
+            ]
+        ),
+        language="text",
+    )
+
     interpretation = interpret_monte_carlo_bin(mc_result, row.to_dict())
     st.markdown("**Интерпретатор результата**")
     st.info(interpretation["headline"])
@@ -1384,8 +1443,6 @@ def _render_monte_carlo_bin_details(mc_result: dict[str, Any], selection: Any, d
     )
     st.dataframe(detail_df, width="stretch", hide_index=True)
 
-    base = mc_result.get("base_params", {})
-    std_map = mc_result.get("std_map", {})
     st.markdown(
         f"""
         **Как посчитан выбранный столбец**
@@ -1546,6 +1603,33 @@ def _render_sobol_factor_details(sobol_result: dict[str, Any], selection: Any, d
     c2.metric("S1 ± conf", f"{s1_conf:.3f}")
     c3.metric("Диапазон фактора", f"{low:.2f} .. {high:.2f}")
     c4.metric("Направление", sign_text)
+
+    s1_low = max(0.0, s1 - s1_conf)
+    s1_high = min(1.0, s1 + s1_conf)
+    share_pct = s1 * 100.0
+    st.markdown("**Техпаспорт расчёта выбранного фактора**")
+    st.info(
+        "Шаг 1: строится Sobol-сэмпл по диапазону фактора. "
+        "Шаг 2: модель прогоняется на всей выборке. "
+        "Шаг 3: считается доля дисперсии Var(E[Y|Xi]) / Var(Y)."
+    )
+    st.code(
+        "\n".join(
+            [
+                "Формулы:",
+                "1) S1_i = Var(E[Y|Xi]) / Var(Y)",
+                "2) N_eval = N * (D + 2)  (для first-order Sobol)",
+                "",
+                f"Подстановка для фактора: {selected_label}",
+                f"S1 = {s1:.4f}  => вклад ~ {share_pct:.1f}% дисперсии прогноза",
+                f"Доверительный коридор: [{s1_low:.4f}; {s1_high:.4f}]",
+                f"N = {n_samples}, D = {d}, N_eval = {n_evaluations}",
+                f"Var(Y) = {y_var:.4f}" if np.isfinite(y_var) else "Var(Y) = н/д",
+                f"Var(E[Y|Xi]) ~= S1*Var(Y) = {explained_var:.4f}" if np.isfinite(explained_var) else "Var(E[Y|Xi]) = н/д",
+            ]
+        ),
+        language="text",
+    )
 
     interpretation = interpret_sobol_factor(sobol_result, row.to_dict())
     st.markdown("**Интерпретатор результата**")
