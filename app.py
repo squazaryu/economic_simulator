@@ -1375,6 +1375,7 @@ def _render_monte_carlo_bin_details(mc_result: dict[str, Any], selection: Any, d
         key=select_key,
     )
     selected_idx = labels.index(selected_label)
+    st.session_state[f"{detail_key_prefix}_selected_idx"] = int(selected_idx)
     row = bins.iloc[selected_idx]
     selected_range = f"{float(row['left']):.1f} .. {float(row['right']):.1f}"
     st.success(f"Выбран столбец Monte Carlo: #{selected_idx + 1} ({selected_range})")
@@ -1597,6 +1598,7 @@ def _render_sobol_factor_details(sobol_result: dict[str, Any], selection: Any, d
     st.caption("Кликните на столбец Tornado Chart или выберите фактор вручную.")
     selected_label = st.selectbox("Фактор", labels, key=select_key)
     selected_idx = labels.index(selected_label)
+    st.session_state[f"{detail_key_prefix}_selected_idx"] = int(selected_idx)
     row = sobol_df.iloc[selected_idx]
     st.success(f"Выбран фактор Sobol: {selected_label}")
     st.caption("Интерпретатор обновляется при каждом новом клике по столбцу или ручном выборе фактора.")
@@ -2306,9 +2308,20 @@ def main() -> None:
             if mc_stale:
                 st.warning("Показан результат Monte Carlo для предыдущих параметров. Нажмите кнопку для пересчета.")
             mc_chart_key = f"mc_hist_{asset_type}_{ticker or 'imoex'}_{regime}"
+            mc_detail_prefix = f"{mc_chart_key}_{len(mc_result.get('results', []))}"
+            mc_selected_key = f"{mc_detail_prefix}_selected_idx"
             mc_fig = go.Figure(mc_result["figure"])
             mc_fig.update_layout(clickmode="event+select")
             mc_fig.update_layout(autosize=True, width=None, height=500)
+            preselected_idx = st.session_state.get(mc_selected_key)
+            if (
+                isinstance(preselected_idx, int)
+                and len(mc_fig.data) > 0
+                and 0 <= preselected_idx < len(mc_result.get("hist_bins", []))
+            ):
+                mc_fig.data[0].selectedpoints = [preselected_idx]
+                mc_fig.data[0].selected = {"marker": {"opacity": 1.0, "color": "#1f78b4"}}
+                mc_fig.data[0].unselected = {"marker": {"opacity": 0.35}}
             if plotly_events is not None:
                 mc_points = plotly_events(
                     mc_fig,
@@ -2320,6 +2333,10 @@ def main() -> None:
                     override_width="100%",
                 )
                 mc_selection = {"points": mc_points} if mc_points else None
+                mc_points_norm = _plotly_selected_points(mc_selection)
+                idx_now = _selected_point_index(mc_points_norm)
+                if idx_now is not None:
+                    st.session_state[mc_selected_key] = int(idx_now)
             else:
                 mc_selection = st.plotly_chart(
                     mc_fig,
@@ -2345,7 +2362,7 @@ def main() -> None:
             _render_monte_carlo_bin_details(
                 mc_result,
                 selection=mc_selection,
-                detail_key_prefix=f"{mc_chart_key}_{len(mc_result.get('results', []))}",
+                detail_key_prefix=mc_detail_prefix,
             )
             if "hist_bins" in mc_result and isinstance(mc_result["hist_bins"], pd.DataFrame):
                 hist_bins_df = mc_result["hist_bins"]
@@ -2390,9 +2407,22 @@ def main() -> None:
             if sobol_stale:
                 st.warning("Показан результат Sobol для предыдущих параметров. Нажмите кнопку для пересчета.")
             sobol_chart_key = f"sobol_{asset_type}_{ticker or 'imoex'}_{regime}"
+            sobol_detail_prefix = f"{sobol_chart_key}_{sobol_result.get('n_evaluations', 0)}"
+            sobol_selected_key = f"{sobol_detail_prefix}_selected_idx"
             sobol_fig = go.Figure(sobol_result["figure"])
             sobol_fig.update_layout(clickmode="event+select")
             sobol_fig.update_layout(autosize=True, width=None, height=500)
+            preselected_sobol_idx = st.session_state.get(sobol_selected_key)
+            sobol_df_curr = sobol_result.get("sobol_df")
+            if (
+                isinstance(preselected_sobol_idx, int)
+                and isinstance(sobol_df_curr, pd.DataFrame)
+                and len(sobol_fig.data) > 0
+                and 0 <= preselected_sobol_idx < len(sobol_df_curr)
+            ):
+                sobol_fig.data[0].selectedpoints = [preselected_sobol_idx]
+                sobol_fig.data[0].selected = {"marker": {"opacity": 1.0}}
+                sobol_fig.data[0].unselected = {"marker": {"opacity": 0.4}}
             if plotly_events is not None:
                 sobol_points = plotly_events(
                     sobol_fig,
@@ -2404,6 +2434,10 @@ def main() -> None:
                     override_width="100%",
                 )
                 sobol_selection = {"points": sobol_points} if sobol_points else None
+                sobol_points_norm = _plotly_selected_points(sobol_selection)
+                sobol_idx_now = _selected_point_index(sobol_points_norm)
+                if sobol_idx_now is not None:
+                    st.session_state[sobol_selected_key] = int(sobol_idx_now)
             else:
                 sobol_selection = st.plotly_chart(
                     sobol_fig,
@@ -2425,7 +2459,7 @@ def main() -> None:
             _render_sobol_factor_details(
                 sobol_result,
                 selection=sobol_selection,
-                detail_key_prefix=f"{sobol_chart_key}_{sobol_result.get('n_evaluations', 0)}",
+                detail_key_prefix=sobol_detail_prefix,
             )
 
 
