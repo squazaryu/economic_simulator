@@ -10,20 +10,23 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from src.data_loader import load_moex_stock, load_moex_tickers
 from src.interpreter import interpret_monte_carlo_bin, interpret_sobol_factor
 from src.model import (
     apply_scenario_adjustments,
     explain_imoex_drivers,
     explain_stock_drivers,
-    load_model_artifact,
-    load_stock_model_artifact,
     predict_scenario,
     predict_stock_scenario,
 )
-from src.monte_carlo import run_monte_carlo
-from src.preprocessing import build_processed_dataset
-from src.sensitivity import run_sobol_sensitivity
+from src.service import (
+    get_imoex_model_service,
+    get_moex_ticker_universe_service,
+    get_processed_dataset_service,
+    get_stock_history_service,
+    get_stock_model_service,
+    run_monte_carlo_service,
+    run_sobol_service,
+)
 
 
 st.set_page_config(
@@ -85,17 +88,17 @@ def _normalize_weights(weight_map: dict[str, float]) -> dict[str, float]:
 
 @st.cache_data(show_spinner=False)
 def get_data() -> pd.DataFrame:
-    return build_processed_dataset()
+    return get_processed_dataset_service()
 
 
 @st.cache_data(show_spinner=False)
 def get_stock_data(ticker: str) -> pd.DataFrame:
-    return load_moex_stock(ticker)
+    return get_stock_history_service(ticker)
 
 
 @st.cache_data(show_spinner=False)
 def get_moex_ticker_universe() -> pd.DataFrame:
-    df = load_moex_tickers().copy()
+    df = get_moex_ticker_universe_service().copy()
     if "ticker" not in df.columns:
         raise ValueError("Список тикеров MOEX не содержит колонку 'ticker'")
     if "shortname" not in df.columns:
@@ -109,12 +112,12 @@ def get_moex_ticker_universe() -> pd.DataFrame:
 
 @st.cache_resource(show_spinner=False)
 def get_imoex_model(regime: str) -> dict[str, Any]:
-    return load_model_artifact(regime=regime)
+    return get_imoex_model_service(regime=regime)
 
 
 @st.cache_resource(show_spinner=False)
 def get_stock_model(ticker: str, regime: str) -> dict[str, Any]:
-    return load_stock_model_artifact(ticker, regime=regime)
+    return get_stock_model_service(ticker=ticker, regime=regime)
 
 
 def _defaults_from_data(df: pd.DataFrame) -> dict[str, float]:
@@ -278,11 +281,11 @@ def _render_sidebar_controls(
         portfolio_tickers, portfolio_weights = _get_portfolio_controls(ticker_options, ticker_names)
 
     b1, b2, b3 = st.sidebar.columns(3)
-    if b1.button("Базовый", use_container_width=True):
+    if b1.button("Базовый", width="stretch"):
         _apply_preset("base", defaults)
-    if b2.button("Оптимистичный", use_container_width=True):
+    if b2.button("Оптимистичный", width="stretch"):
         _apply_preset("optimistic", defaults)
-    if b3.button("Пессимистичный", use_container_width=True):
+    if b3.button("Пессимистичный", width="stretch"):
         _apply_preset("pessimistic", defaults)
 
     controls: dict[str, float] = {}
@@ -1379,7 +1382,7 @@ def _render_monte_carlo_bin_details(mc_result: dict[str, Any], selection: Any, d
             {"Параметр": "Инфляция", "Среднее в бине": float(row["inflation_mean"])},
         ]
     )
-    st.dataframe(detail_df, use_container_width=True, hide_index=True)
+    st.dataframe(detail_df, width="stretch", hide_index=True)
 
     base = mc_result.get("base_params", {})
     std_map = mc_result.get("std_map", {})
@@ -1429,7 +1432,7 @@ def _render_monte_carlo_bin_details(mc_result: dict[str, Any], selection: Any, d
         ]
     )
     st.markdown("**Логика расчета (пошагово)**")
-    st.dataframe(logic_df, use_container_width=True, hide_index=True)
+    st.dataframe(logic_df, width="stretch", hide_index=True)
 
 
 def _ensure_mc_detail_payload(mc_result: dict[str, Any], controls: dict[str, float]) -> dict[str, Any]:
@@ -1575,7 +1578,7 @@ def _render_sobol_factor_details(sobol_result: dict[str, Any], selection: Any, d
         ]
     )
     st.markdown("**Логика расчета (пошагово)**")
-    st.dataframe(logic_df, use_container_width=True, hide_index=True)
+    st.dataframe(logic_df, width="stretch", hide_index=True)
 
 
 def main() -> None:
@@ -1639,11 +1642,11 @@ def main() -> None:
             График помогает увидеть тренды, а корреляционная матрица — силу линейной связи между факторами.
             """
         )
-        st.plotly_chart(_historical_chart(plot_df, asset_type, ticker), use_container_width=True)
+        st.plotly_chart(_historical_chart(plot_df, asset_type, ticker), width="stretch")
         corr_fig = _correlation_heatmap(plot_df, asset_type, ticker)
         corr_cols = _correlation_columns(plot_df, asset_type, ticker)
         labels = _factor_label_map(ticker)
-        st.plotly_chart(corr_fig, use_container_width=True)
+        st.plotly_chart(corr_fig, width="stretch")
         st.caption("Выбор пары для drilldown делается через селекторы ниже (стабильный режим).")
 
         with st.expander("Как читать корреляционную матрицу"):
@@ -1684,7 +1687,7 @@ def main() -> None:
 
             st.plotly_chart(
                 _correlation_drilldown_figure(plot_df, x_selected, y_selected, ticker),
-                use_container_width=True,
+                width="stretch",
             )
 
         insights = _correlation_insights(plot_df, asset_type, ticker)
@@ -1744,7 +1747,7 @@ def main() -> None:
         else:
             st.success(f"Сценарий ближе к базовому: {stress_index:.0f}/100")
 
-        st.plotly_chart(_gauge_chart(prediction, current, asset_label=asset_label), use_container_width=True)
+        st.plotly_chart(_gauge_chart(prediction, current, asset_label=asset_label), width="stretch")
 
         raw_imoex = predict_scenario(
             oil=controls["oil"],
@@ -1794,7 +1797,7 @@ def main() -> None:
             )
             st.plotly_chart(
                 _trajectory_figure(current, forecast_paths, horizon_months=horizon_months, asset_label=asset_label),
-                use_container_width=True,
+                width="stretch",
                 key=f"fan_{asset_type}_{ticker or 'imoex'}_{regime}_{horizon_months}_{effective_n_paths}",
             )
             st.caption(f"Размер веера: {effective_n_paths} траекторий.")
@@ -1844,7 +1847,7 @@ def main() -> None:
         st.dataframe(
             timeline_df[["date", "oil", "key_rate", "usd_rub", "inflation"]],
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
         )
 
         if len(timeline_df) > 0:
@@ -1943,7 +1946,7 @@ def main() -> None:
             timeline_pred_arr = np.asarray(timeline_predictions, dtype=float)
             st.plotly_chart(
                 _timeline_path_figure(current, tl, timeline_pred_arr, asset_label=asset_label),
-                use_container_width=True,
+                width="stretch",
             )
         except Exception as exc:
             st.warning(f"Не удалось рассчитать ручной таймлайн: {exc}")
@@ -1979,7 +1982,7 @@ def main() -> None:
             row_count=scenario_row_count,
         )
 
-        st.dataframe(editor_df, use_container_width=True, hide_index=True)
+        st.dataframe(editor_df, width="stretch", hide_index=True)
 
         if len(editor_df) > 0:
             row_labels = [f"{idx + 1} — {str(editor_df.loc[idx, 'Сценарий'])}" for idx in range(len(editor_df))]
@@ -2123,7 +2126,7 @@ def main() -> None:
                     portfolio_tickers=portfolio_tickers,
                     portfolio_weights=portfolio_weights,
                 )
-                st.dataframe(cmp_df, use_container_width=True, hide_index=True)
+                st.dataframe(cmp_df, width="stretch", hide_index=True)
 
                 fig_cmp = go.Figure()
                 fig_cmp.add_trace(
@@ -2151,7 +2154,7 @@ def main() -> None:
                     yaxis2=dict(title="Δ %", overlaying="y", side="right"),
                     template="plotly_white",
                 )
-                st.plotly_chart(fig_cmp, use_container_width=True)
+                st.plotly_chart(fig_cmp, width="stretch")
             except Exception as exc:
                 st.warning(f"Не удалось построить сравнение сценариев: {exc}")
 
@@ -2174,21 +2177,15 @@ def main() -> None:
             progress.progress(15, text="Загрузка параметров...")
             try:
                 mc_runs = 5000 if cpu_saver else 10000
-                result = run_monte_carlo(
-                    {
-                        "oil": controls["oil"],
-                        "key_rate": controls["key_rate"],
-                        "usd_rub": controls["usd_rub"],
-                        "inflation": controls["inflation"],
-                    },
-                    n_simulations=mc_runs,
+                result = run_monte_carlo_service(
+                    controls=controls,
+                    mc_runs=mc_runs,
                     asset_type=asset_type,
                     ticker=ticker,
                     adjustments=adjustments,
-                    uncertainty_scale=controls["uncertainty_scale"],
                     regime=regime,
                     portfolio_tickers=portfolio_tickers,
-                    portfolio_weights=[portfolio_weights[t] for t in portfolio_tickers] if portfolio_weights else None,
+                    portfolio_weights=portfolio_weights,
                 )
                 st.session_state["mc_result"] = result
                 st.session_state["mc_context_key"] = sim_context_key
@@ -2210,7 +2207,7 @@ def main() -> None:
             mc_fig.update_layout(clickmode="event+select")
             mc_selection = st.plotly_chart(
                 mc_fig,
-                use_container_width=True,
+                width="stretch",
                 key=mc_chart_key,
                 on_select="rerun",
                 selection_mode=("points", "box", "lasso"),
@@ -2257,13 +2254,13 @@ def main() -> None:
             with st.spinner("Выполняю анализ чувствительности..."):
                 try:
                     sobol_samples = 256 if cpu_saver else 512
-                    sobol_result = run_sobol_sensitivity(
+                    sobol_result = run_sobol_service(
                         n_samples=sobol_samples,
                         asset_type=asset_type,
                         ticker=ticker,
                         regime=regime,
                         portfolio_tickers=portfolio_tickers,
-                        portfolio_weights=[portfolio_weights[t] for t in portfolio_tickers] if portfolio_weights else None,
+                        portfolio_weights=portfolio_weights,
                     )
                     st.session_state["sobol_result"] = sobol_result
                     st.session_state["sobol_context_key"] = sim_context_key
@@ -2281,7 +2278,7 @@ def main() -> None:
             sobol_fig.update_layout(clickmode="event+select")
             sobol_selection = st.plotly_chart(
                 sobol_fig,
-                use_container_width=True,
+                width="stretch",
                 key=sobol_chart_key,
                 on_select="rerun",
                 selection_mode=("points", "box", "lasso"),

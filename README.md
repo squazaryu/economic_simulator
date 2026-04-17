@@ -51,11 +51,17 @@ economic_simulator/
 ├── models/
 ├── src/
 │   ├── __init__.py
+│   ├── system_apis.py
+│   ├── engine.py
+│   ├── service.py
 │   ├── data_loader.py
 │   ├── preprocessing.py
 │   ├── model.py
 │   ├── monte_carlo.py
-│   └── sensitivity.py
+│   ├── sensitivity.py
+│   └── interpreter.py
+├── tests/
+│   └── test_streamlit_smoke.py
 ├── app.py
 ├── requirements.txt
 ├── .gitignore
@@ -73,6 +79,18 @@ source .venv/bin/activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+## Архитектура
+
+Проект приведен к цепочке:
+**UI → Service → Engine → System APIs**
+
+- **UI** (`app.py`) отвечает только за взаимодействие с пользователем, виджеты и визуализацию.
+- **Service** (`src/service.py`) оркестрирует сценарии UI, подготавливает параметры и вызывает вычислительные контуры.
+- **Engine** (`src/engine.py`) запускает вычисления Monte Carlo и Sobol.
+- **System APIs** (`src/system_apis.py`) инкапсулирует доступ к внешним API/данным и модельным артефактам.
+
+Такое разделение упрощает тестирование и снижает связность UI с вычислительным кодом.
 
 ## Логика модулей
 
@@ -111,6 +129,33 @@ streamlit run app.py
 - Полная русификация пользовательского интерфейса.
 - Динамический график будущей траектории и веер неопределенности.
 - Сравнение сценариев и портфельный режим.
+
+7. `src/service.py`
+- Принимает контекст UI и маршрутизирует запросы в engine/system_apis.
+- Держит бизнес-правила сборки параметров симуляций.
+
+8. `src/engine.py`
+- Единая точка для вычислительных движков Monte Carlo и Sobol.
+
+9. `src/system_apis.py`
+- Единая точка для загрузки датасетов, истории тикеров и модельных артефактов.
+
+10. `src/interpreter.py`
+- Интерпретация результатов Monte Carlo/Sobol в человеко-понятных терминах.
+
+## Тесты
+
+Добавлены smoke-тесты Streamlit:
+
+- Monte Carlo строит ключевые метрики и блок детализации.
+- Sobol строит блок детализации и итоговое сообщение по главному фактору.
+- Интерпретатор обновляется при переключении выбранного диапазона бина.
+
+Запуск:
+
+```bash
+pytest -q
+```
 
 ## Ограничения
 
