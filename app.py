@@ -1336,6 +1336,22 @@ def _selected_point_index(points: list[dict[str, Any]]) -> int | None:
     return None
 
 
+def _selection_from_state(chart_key: str) -> Any:
+    """Fallback: берем selection из session_state, если st.plotly_chart вернул None."""
+    state_obj = st.session_state.get(chart_key)
+    if state_obj is None:
+        return None
+    if isinstance(state_obj, dict):
+        if "selection" in state_obj:
+            return state_obj["selection"]
+        if "points" in state_obj:
+            return state_obj
+    sel_attr = getattr(state_obj, "selection", None)
+    if sel_attr is not None:
+        return sel_attr
+    return state_obj
+
+
 def _runtime_placeholder_figure(title: str, message: str) -> go.Figure:
     fig = go.Figure()
     fig.add_annotation(
@@ -2433,8 +2449,10 @@ def main() -> None:
                 width="stretch",
                 key=mc_chart_key,
                 on_select="rerun",
-                selection_mode=("points", "box", "lasso"),
+                selection_mode=("points",),
             )
+            if not _plotly_selected_points(mc_selection):
+                mc_selection = _selection_from_state(mc_chart_key)
             st.caption("Если клик не синхронизирует интерпретатор, используйте список диапазонов ниже.")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("P5", f"{mc_result['var_5']:.1f}")
@@ -2519,8 +2537,10 @@ def main() -> None:
                 width="stretch",
                 key=sobol_chart_key,
                 on_select="rerun",
-                selection_mode=("points", "box", "lasso"),
+                selection_mode=("points",),
             )
+            if not _plotly_selected_points(sobol_selection):
+                sobol_selection = _selection_from_state(sobol_chart_key)
             st.caption("Если клик не синхронизирует интерпретатор, используйте выбор фактора ниже.")
             st.info(
                 "Наибольшее влияние оказывает "
