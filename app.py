@@ -2316,6 +2316,7 @@ def main() -> None:
                     hover_event=False,
                     key=f"{mc_chart_key}_events",
                     override_height=450,
+                    override_width="100%",
                 )
                 mc_selection = {"points": mc_points} if mc_points else None
             else:
@@ -2398,6 +2399,7 @@ def main() -> None:
                     hover_event=False,
                     key=f"{sobol_chart_key}_events",
                     override_height=450,
+                    override_width="100%",
                 )
                 sobol_selection = {"points": sobol_points} if sobol_points else None
             else:
