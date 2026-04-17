@@ -9,10 +9,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
-try:
-    from streamlit_plotly_events import plotly_events
-except Exception:
-    plotly_events = None
 
 from src.interpreter import interpret_monte_carlo_bin, interpret_sobol_factor
 from src.model import (
@@ -2312,25 +2308,13 @@ def main() -> None:
             mc_chart_key = f"mc_hist_{asset_type}_{ticker or 'imoex'}_{regime}"
             mc_fig = go.Figure(mc_result["figure"])
             mc_fig.update_layout(clickmode="event+select")
-            if plotly_events is not None:
-                mc_points = plotly_events(
-                    mc_fig,
-                    click_event=True,
-                    select_event=True,
-                    hover_event=False,
-                    key=f"{mc_chart_key}_events",
-                    override_height=450,
-                    override_width="100%",
-                )
-                mc_selection = {"points": mc_points} if mc_points else None
-            else:
-                mc_selection = st.plotly_chart(
-                    mc_fig,
-                    width="stretch",
-                    key=mc_chart_key,
-                    on_select="rerun",
-                    selection_mode=("points", "box", "lasso"),
-                )
+            mc_selection = st.plotly_chart(
+                mc_fig,
+                width="stretch",
+                key=mc_chart_key,
+                on_select="rerun",
+                selection_mode=("points", "box", "lasso"),
+            )
             st.caption("Если клик не синхронизирует интерпретатор, используйте список диапазонов ниже.")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("P5", f"{mc_result['var_5']:.1f}")
@@ -2395,25 +2379,13 @@ def main() -> None:
             sobol_chart_key = f"sobol_{asset_type}_{ticker or 'imoex'}_{regime}"
             sobol_fig = go.Figure(sobol_result["figure"])
             sobol_fig.update_layout(clickmode="event+select")
-            if plotly_events is not None:
-                sobol_points = plotly_events(
-                    sobol_fig,
-                    click_event=True,
-                    select_event=True,
-                    hover_event=False,
-                    key=f"{sobol_chart_key}_events",
-                    override_height=450,
-                    override_width="100%",
-                )
-                sobol_selection = {"points": sobol_points} if sobol_points else None
-            else:
-                sobol_selection = st.plotly_chart(
-                    sobol_fig,
-                    width="stretch",
-                    key=sobol_chart_key,
-                    on_select="rerun",
-                    selection_mode=("points", "box", "lasso"),
-                )
+            sobol_selection = st.plotly_chart(
+                sobol_fig,
+                width="stretch",
+                key=sobol_chart_key,
+                on_select="rerun",
+                selection_mode=("points", "box", "lasso"),
+            )
             st.caption("Если клик не синхронизирует интерпретатор, используйте выбор фактора ниже.")
             st.info(
                 "Наибольшее влияние оказывает "
