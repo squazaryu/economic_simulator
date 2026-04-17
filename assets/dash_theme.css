@@ -46,6 +46,30 @@
   color: #e2e8f0;
 }
 
+.Select-control,
+.Select-menu-outer,
+input[type="text"] {
+  background: #0f172a !important;
+  color: #e2e8f0 !important;
+  border-color: rgba(148, 163, 184, 0.35) !important;
+}
+
+.Select-value-label,
+.Select-placeholder,
+.VirtualizedSelectOption {
+  color: #e2e8f0 !important;
+}
+
+.dash-input {
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.dash-radio-items label {
+  margin-right: 14px;
+  color: #e2e8f0;
+}
+
 .btn-primary {
   background: linear-gradient(135deg, #0ea5e9, #0284c7);
   color: #ffffff;
@@ -68,4 +92,3 @@
 .graph {
   border-radius: 12px;
 }
-

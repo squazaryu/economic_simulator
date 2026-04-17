@@ -110,6 +110,66 @@ def _asset_current(df: pd.DataFrame, asset_type: str, ticker: str) -> float:
     return float(pd.to_numeric(df["imoex_close"], errors="coerce").dropna().iloc[-1])
 
 
+def _empty_figure(title: str, message: str) -> go.Figure:
+    fig = go.Figure()
+    fig.add_annotation(
+        x=0.5,
+        y=0.5,
+        xref="paper",
+        yref="paper",
+        text=message,
+        showarrow=False,
+        font=dict(size=16, color="#cbd5e1"),
+    )
+    fig.update_layout(
+        title=title,
+        template="plotly_dark",
+        paper_bgcolor="#111827",
+        plot_bgcolor="#111827",
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False),
+        margin=dict(l=40, r=40, t=60, b=40),
+    )
+    return fig
+
+
+def _parse_portfolio_weights(weight_text: str, n: int) -> list[float]:
+    if n <= 0:
+        return []
+    try:
+        parts = [p.strip() for p in (weight_text or "").split(",") if p.strip()]
+        vals = [float(x) for x in parts]
+    except Exception:
+        vals = []
+    if len(vals) != n or sum(vals) <= 0:
+        return [1.0 / n] * n
+    s = sum(vals)
+    return [v / s for v in vals]
+
+
+def _predict_portfolio_snapshot(
+    tickers: list[str],
+    weights: list[float],
+    oil: float,
+    key_rate: float,
+    usd_rub: float,
+    inflation: float,
+    regime: str,
+) -> tuple[float, float]:
+    if not tickers:
+        raise ValueError("Портфель пуст")
+    pred = 0.0
+    cur = 0.0
+    for t, w in zip(tickers, weights):
+        p = predict_stock_scenario(t, oil, key_rate, usd_rub, inflation, regime=regime)
+        s = get_stock_history_service(t)
+        col = f"{t.lower()}_close"
+        c = float(pd.to_numeric(s[col], errors="coerce").dropna().iloc[-1]) if col in s.columns else 0.0
+        pred += w * float(p)
+        cur += w * c
+    return float(pred), float(cur)
+
+
 def build_layout(df: pd.DataFrame) -> html.Div:
     default = df.iloc[-1]
     slider_common = {
@@ -154,15 +214,33 @@ def build_layout(df: pd.DataFrame) -> html.Div:
                                     html.Label("Целевой актив", className="label"),
                                     dcc.RadioItems(
                                         id="asset-type",
+                                        className="dash-radio-items",
                                         options=[
                                             {"label": "IMOEX", "value": "imoex"},
                                             {"label": "Акция MOEX", "value": "stock"},
+                                            {"label": "Портфель MOEX", "value": "portfolio"},
                                         ],
                                         value="imoex",
                                         inline=True,
                                     ),
                                     html.Label("Тикер (для акции)", className="label"),
                                     dcc.Dropdown(id="ticker", options=_ticker_options(), value="LKOH", clearable=False),
+                                    html.Label("Тикеры портфеля (для портфеля)", className="label"),
+                                    dcc.Dropdown(
+                                        id="portfolio-tickers",
+                                        options=_ticker_options(),
+                                        value=["LKOH", "SBER", "GAZP"],
+                                        multi=True,
+                                        clearable=False,
+                                    ),
+                                    html.Label("Веса портфеля через запятую, % (например: 40,35,25)", className="label"),
+                                    dcc.Input(
+                                        id="portfolio-weights",
+                                        className="dash-input",
+                                        type="text",
+                                        value="40,35,25",
+                                        style={"width": "100%"},
+                                    ),
                                     html.Label("Режим модели", className="label"),
                                     dcc.Dropdown(id="regime", options=REGIME_OPTIONS, value="all", clearable=False),
                                     html.Label("Brent", className="label"),
@@ -215,7 +293,11 @@ def build_layout(df: pd.DataFrame) -> html.Div:
                         selected_className="tab--selected",
                         children=[
                             html.Button("Запустить Monte Carlo", id="run-mc", n_clicks=0, className="btn-primary"),
-                            dcc.Graph(id="mc-fig", className="graph"),
+                            dcc.Graph(
+                                id="mc-fig",
+                                className="graph",
+                                figure=_empty_figure("Monte Carlo", "Нажмите «Запустить Monte Carlo»."),
+                            ),
                             html.Div(
                                 [
                                     html.Label("Диапазон (бин)", className="label"),
@@ -233,7 +315,11 @@ def build_layout(df: pd.DataFrame) -> html.Div:
                         selected_className="tab--selected",
                         children=[
                             html.Button("Рассчитать Sobol", id="run-sobol", n_clicks=0, className="btn-primary"),
-                            dcc.Graph(id="sobol-fig", className="graph"),
+                            dcc.Graph(
+                                id="sobol-fig",
+                                className="graph",
+                                figure=_empty_figure("Sobol-анализ", "Нажмите «Рассчитать Sobol»."),
+                            ),
                             html.Div([html.Label("Фактор", className="label"), dcc.Dropdown(id="sobol-factor-select", clearable=False)], className="card"),
                             html.Div(id="sobol-stats", className="card"),
                             dcc.Store(id="sobol-store"),
@@ -253,6 +339,8 @@ def build_layout(df: pd.DataFrame) -> html.Div:
     State("asset-type", "value"),
     State("ticker", "value"),
     State("regime", "value"),
+    State("portfolio-tickers", "value"),
+    State("portfolio-weights", "value"),
     State("oil", "value"),
     State("key-rate", "value"),
     State("usd-rub", "value"),
@@ -264,20 +352,38 @@ def run_scenario_cb(
     asset_type: str,
     ticker: str,
     regime: str,
+    portfolio_tickers: list[str] | None,
+    portfolio_weights_text: str,
     oil: float,
     key_rate: float,
     usd_rub: float,
     inflation: float,
 ) -> html.Div:
     df = _load_dataset()
-    if asset_type == "stock":
-        pred = predict_stock_scenario(ticker, oil, key_rate, usd_rub, inflation, regime=regime)
-        cur = _asset_current(df, "stock", ticker)
-        label = f"Акция {ticker}"
-    else:
-        pred = predict_scenario(oil, key_rate, usd_rub, inflation, regime=regime)
-        cur = _asset_current(df, "imoex", ticker)
-        label = "IMOEX"
+    try:
+        if asset_type == "stock":
+            pred = predict_stock_scenario(ticker, oil, key_rate, usd_rub, inflation, regime=regime)
+            cur = _asset_current(df, "stock", ticker)
+            label = f"Акция {ticker}"
+        elif asset_type == "portfolio":
+            tickers = [str(t).upper().strip() for t in (portfolio_tickers or []) if str(t).strip()]
+            weights = _parse_portfolio_weights(portfolio_weights_text, len(tickers))
+            pred, cur = _predict_portfolio_snapshot(
+                tickers,
+                weights,
+                oil=oil,
+                key_rate=key_rate,
+                usd_rub=usd_rub,
+                inflation=inflation,
+                regime=regime,
+            )
+            label = f"Портфель ({', '.join(tickers[:4])})"
+        else:
+            pred = predict_scenario(oil, key_rate, usd_rub, inflation, regime=regime)
+            cur = _asset_current(df, "imoex", ticker)
+            label = "IMOEX"
+    except Exception as exc:
+        return html.Div([html.B("Ошибка расчета сценария"), html.Div(str(exc))])
     delta = pred - cur
     pct = delta / cur if cur else 0.0
     return html.Div(
@@ -297,6 +403,8 @@ def run_scenario_cb(
     State("asset-type", "value"),
     State("ticker", "value"),
     State("regime", "value"),
+    State("portfolio-tickers", "value"),
+    State("portfolio-weights", "value"),
     State("oil", "value"),
     State("key-rate", "value"),
     State("usd-rub", "value"),
@@ -308,6 +416,8 @@ def run_mc_cb(
     asset_type: str,
     ticker: str,
     regime: str,
+    portfolio_tickers: list[str] | None,
+    portfolio_weights_text: str,
     oil: float,
     key_rate: float,
     usd_rub: float,
@@ -320,16 +430,27 @@ def run_mc_cb(
         "inflation": _safe_float(inflation),
         "uncertainty_scale": 1.0,
     }
-    result = run_monte_carlo_service(
-        controls=controls,
-        mc_runs=5000,
-        asset_type=asset_type,
-        ticker=ticker if asset_type == "stock" else None,
-        adjustments={},
-        regime=regime,
-        portfolio_tickers=[],
-        portfolio_weights=None,
-    )
+    tickers = [str(t).upper().strip() for t in (portfolio_tickers or []) if str(t).strip()]
+    weights = _parse_portfolio_weights(portfolio_weights_text, len(tickers))
+    weight_map = {t: w for t, w in zip(tickers, weights)}
+    try:
+        result = run_monte_carlo_service(
+            controls=controls,
+            mc_runs=5000,
+            asset_type=asset_type,
+            ticker=ticker if asset_type == "stock" else None,
+            adjustments={},
+            regime=regime,
+            portfolio_tickers=tickers if asset_type == "portfolio" else [],
+            portfolio_weights=weight_map if asset_type == "portfolio" else None,
+        )
+    except Exception as exc:
+        return (
+            _empty_figure("Monte Carlo", f"Ошибка: {exc}"),
+            {},
+            [],
+            None,
+        )
     bins = result["hist_bins"].copy()
     bins["label"] = bins.apply(lambda r: f"{int(r['bin_index'])+1}: {r['left']:.1f} .. {r['right']:.1f}", axis=1)
     options = [{"label": l, "value": l} for l in bins["label"].tolist()]
@@ -411,17 +532,37 @@ def mc_detail_cb(selected_label: str | None, mc_store: dict[str, Any] | None):
     State("asset-type", "value"),
     State("ticker", "value"),
     State("regime", "value"),
+    State("portfolio-tickers", "value"),
+    State("portfolio-weights", "value"),
     prevent_initial_call=True,
 )
-def run_sobol_cb(_n: int, asset_type: str, ticker: str, regime: str):
-    result = run_sobol_service(
-        n_samples=256,
-        asset_type=asset_type,
-        ticker=ticker if asset_type == "stock" else None,
-        regime=regime,
-        portfolio_tickers=[],
-        portfolio_weights=None,
-    )
+def run_sobol_cb(
+    _n: int,
+    asset_type: str,
+    ticker: str,
+    regime: str,
+    portfolio_tickers: list[str] | None,
+    portfolio_weights_text: str,
+):
+    tickers = [str(t).upper().strip() for t in (portfolio_tickers or []) if str(t).strip()]
+    weights = _parse_portfolio_weights(portfolio_weights_text, len(tickers))
+    weight_map = {t: w for t, w in zip(tickers, weights)}
+    try:
+        result = run_sobol_service(
+            n_samples=256,
+            asset_type=asset_type,
+            ticker=ticker if asset_type == "stock" else None,
+            regime=regime,
+            portfolio_tickers=tickers if asset_type == "portfolio" else [],
+            portfolio_weights=weight_map if asset_type == "portfolio" else None,
+        )
+    except Exception as exc:
+        return (
+            _empty_figure("Sobol-анализ", f"Ошибка: {exc}"),
+            {},
+            [],
+            None,
+        )
     sobol_df = result["sobol_df"].copy()
     labels = sobol_df["factor_label"].astype(str).tolist()
     options = [{"label": x, "value": x} for x in labels]
