@@ -1569,6 +1569,7 @@ def _render_sobol_factor_details(sobol_result: dict[str, Any], selection: Any, d
     if not isinstance(sobol_df, pd.DataFrame) or sobol_df.empty:
         return
 
+    labels = sobol_df["factor_label"].astype(str).tolist()
     points = _plotly_selected_points(selection)
     clicked_idx = _selected_point_index(points)
     if clicked_idx is None and points:
@@ -1585,13 +1586,16 @@ def _render_sobol_factor_details(sobol_result: dict[str, Any], selection: Any, d
     if clicked_idx is not None and (clicked_idx < 0 or clicked_idx >= len(sobol_df)):
         clicked_idx = None
 
-    labels = sobol_df["factor_label"].astype(str).tolist()
     select_key = f"{detail_key_prefix}_factor_select"
+    click_idx_key = f"{detail_key_prefix}_factor_click_idx"
     if labels:
         if select_key not in st.session_state:
             st.session_state[select_key] = labels[0]
-        if clicked_idx is not None:
+        # Применяем клик только если это новый клик, иначе ручной выбор из selectbox
+        # будет перезаписываться на каждом rerun.
+        if clicked_idx is not None and st.session_state.get(click_idx_key) != clicked_idx:
             st.session_state[select_key] = labels[clicked_idx]
+            st.session_state[click_idx_key] = clicked_idx
 
     st.markdown("**Детализация выбранного столбца Sobol**")
     st.caption("Кликните на столбец Tornado Chart или выберите фактор вручную.")
