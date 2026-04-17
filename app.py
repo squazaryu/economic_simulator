@@ -1373,6 +1373,18 @@ def _record_runtime_metric(name: str, ok: bool, context_key: str, duration_sec: 
         "error": str(error) if error else None,
         "ts": int(time.time()),
     }
+    hist_key = f"{name}_runtime_hist"
+    hist = st.session_state.get(hist_key, [])
+    if not isinstance(hist, list):
+        hist = []
+    hist.append(
+        {
+            "ok": bool(ok),
+            "duration_sec": float(duration_sec),
+            "ts": int(time.time()),
+        }
+    )
+    st.session_state[hist_key] = hist[-20:]
 
 
 def _render_runtime_health(sim_context_key: str) -> None:
@@ -1395,6 +1407,35 @@ def _render_runtime_health(sim_context_key: str) -> None:
             ]
         )
     )
+
+
+def _render_runtime_profiler(cpu_saver: bool) -> None:
+    def _stat(name: str) -> dict[str, float | int]:
+        hist = st.session_state.get(f"{name}_runtime_hist", [])
+        if not isinstance(hist, list) or not hist:
+            return {"n": 0, "avg": 0.0, "p50": 0.0, "last": 0.0}
+        durations = [float(x.get("duration_sec", 0.0)) for x in hist if isinstance(x, dict)]
+        if not durations:
+            return {"n": 0, "avg": 0.0, "p50": 0.0, "last": 0.0}
+        arr = np.asarray(durations, dtype=float)
+        return {
+            "n": int(len(arr)),
+            "avg": float(arr.mean()),
+            "p50": float(np.percentile(arr, 50)),
+            "last": float(arr[-1]),
+        }
+
+    mc = _stat("mc")
+    sb = _stat("sobol")
+    c1, c2 = st.columns(2)
+    c1.metric("MC avg / p50 (сек)", f"{mc['avg']:.2f} / {mc['p50']:.2f}", delta=f"last {mc['last']:.2f}s")
+    c2.metric("Sobol avg / p50 (сек)", f"{sb['avg']:.2f} / {sb['p50']:.2f}", delta=f"last {sb['last']:.2f}s")
+
+    heavy = max(float(mc["avg"]), float(sb["avg"]))
+    if heavy > 4.0 and not cpu_saver:
+        st.info("Профайлер: расчеты тяжелые. Рекомендуется включить `Экономный режим CPU`.")
+    elif heavy <= 2.0 and cpu_saver and (mc["n"] >= 3 or sb["n"] >= 3):
+        st.caption("Профайлер: расчеты стабильные. Можно попробовать отключить `Экономный режим CPU` для большей точности.")
 
 
 def _render_monte_carlo_bin_details(mc_result: dict[str, Any], selection: Any, detail_key_prefix: str) -> None:
@@ -1791,6 +1832,7 @@ def main() -> None:
         st.session_state["sim_context_key"] = sim_context_key
 
     _render_runtime_health(sim_context_key)
+    _render_runtime_profiler(cpu_saver=cpu_saver)
 
     plot_df = _build_plot_df(df, asset_type, ticker, portfolio_tickers, portfolio_weights)
 
