@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import numpy as np
@@ -1335,6 +1336,67 @@ def _selected_point_index(points: list[dict[str, Any]]) -> int | None:
     return None
 
 
+def _runtime_placeholder_figure(title: str, message: str) -> go.Figure:
+    fig = go.Figure()
+    fig.add_annotation(
+        x=0.5,
+        y=0.5,
+        xref="paper",
+        yref="paper",
+        text=message,
+        showarrow=False,
+    )
+    fig.update_layout(
+        title=title,
+        template="plotly_white",
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False),
+    )
+    return fig
+
+
+def _safe_figure_from_result(result: dict[str, Any], key: str, title: str, message: str) -> go.Figure:
+    try:
+        fig = go.Figure(result[key])
+        if len(fig.data) == 0:
+            return _runtime_placeholder_figure(title, message)
+        return fig
+    except Exception:
+        return _runtime_placeholder_figure(title, message)
+
+
+def _record_runtime_metric(name: str, ok: bool, context_key: str, duration_sec: float, error: str | None = None) -> None:
+    st.session_state[f"{name}_runtime"] = {
+        "ok": bool(ok),
+        "context_key": str(context_key),
+        "duration_sec": float(duration_sec),
+        "error": str(error) if error else None,
+        "ts": int(time.time()),
+    }
+
+
+def _render_runtime_health(sim_context_key: str) -> None:
+    def _fmt(item: dict[str, Any] | None, label: str) -> str:
+        if not item:
+            return f"{label}: н/д"
+        stale = item.get("context_key") != sim_context_key
+        ok = "OK" if item.get("ok") else "ERR"
+        dur = float(item.get("duration_sec", 0.0))
+        suffix = " (stale)" if stale else ""
+        err = f", error={item.get('error')}" if item.get("error") else ""
+        return f"{label}: {ok}{suffix}, {dur:.2f}s{err}"
+
+    st.caption(
+        "Health-check: "
+        + " | ".join(
+            [
+                _fmt(st.session_state.get("mc_runtime"), "Monte Carlo"),
+                _fmt(st.session_state.get("sobol_runtime"), "Sobol"),
+            ]
+        )
+    )
+
+
 def _render_monte_carlo_bin_details(mc_result: dict[str, Any], selection: Any, detail_key_prefix: str) -> None:
     bins = mc_result.get("hist_bins")
     if not isinstance(bins, pd.DataFrame) or bins.empty:
@@ -1727,6 +1789,8 @@ def main() -> None:
     context_changed = st.session_state.get("sim_context_key") != sim_context_key
     if context_changed:
         st.session_state["sim_context_key"] = sim_context_key
+
+    _render_runtime_health(sim_context_key)
 
     plot_df = _build_plot_df(df, asset_type, ticker, portfolio_tickers, portfolio_weights)
 
@@ -2275,9 +2339,16 @@ def main() -> None:
         if context_changed or mc_stale:
             st.info("Параметры изменились. Пересчитайте Monte Carlo для нового сценария.")
 
-        if st.button("Запустить симуляцию Монте-Карло", key="run_mc"):
+        b_run_mc, b_reset_mc = st.columns([1.2, 1.0])
+        if b_reset_mc.button("Сбросить результат Monte Carlo", key="reset_mc"):
+            st.session_state.pop("mc_result", None)
+            st.session_state.pop("mc_context_key", None)
+            st.session_state.pop("mc_runtime", None)
+
+        if b_run_mc.button("Запустить симуляцию Монте-Карло", key="run_mc"):
             progress = st.progress(0, text="Подготовка симуляции...")
             progress.progress(15, text="Загрузка параметров...")
+            t0 = time.perf_counter()
             try:
                 mc_runs = 5000 if cpu_saver else 10000
                 result = run_monte_carlo_service(
@@ -2293,9 +2364,11 @@ def main() -> None:
                 st.session_state["mc_result"] = result
                 st.session_state["mc_context_key"] = sim_context_key
                 progress.progress(100, text="Готово")
+                _record_runtime_metric("mc", ok=True, context_key=sim_context_key, duration_sec=time.perf_counter() - t0)
             except Exception as exc:
                 progress.empty()
                 st.error(f"Ошибка Monte Carlo: {exc}")
+                _record_runtime_metric("mc", ok=False, context_key=sim_context_key, duration_sec=time.perf_counter() - t0, error=str(exc))
 
         mc_result = st.session_state.get("mc_result")
         mc_context_key = st.session_state.get("mc_context_key")
@@ -2306,7 +2379,12 @@ def main() -> None:
             if mc_stale:
                 st.warning("Показан результат Monte Carlo для предыдущих параметров. Нажмите кнопку для пересчета.")
             mc_chart_key = f"mc_hist_{asset_type}_{ticker or 'imoex'}_{regime}"
-            mc_fig = go.Figure(mc_result["figure"])
+            mc_fig = _safe_figure_from_result(
+                mc_result,
+                key="figure",
+                title="Monte Carlo",
+                message="Не удалось отрисовать график Monte Carlo. Пересчитайте симуляцию.",
+            )
             mc_fig.update_layout(clickmode="event+select")
             mc_selection = st.plotly_chart(
                 mc_fig,
@@ -2353,8 +2431,15 @@ def main() -> None:
         if context_changed or sobol_stale:
             st.info("Параметры изменились. Пересчитайте Sobol-анализ для нового сценария.")
 
-        if st.button("Рассчитать чувствительность Sobol", key="run_sobol"):
+        b_run_sobol, b_reset_sobol = st.columns([1.2, 1.0])
+        if b_reset_sobol.button("Сбросить результат Sobol", key="reset_sobol"):
+            st.session_state.pop("sobol_result", None)
+            st.session_state.pop("sobol_context_key", None)
+            st.session_state.pop("sobol_runtime", None)
+
+        if b_run_sobol.button("Рассчитать чувствительность Sobol", key="run_sobol"):
             with st.spinner("Выполняю анализ чувствительности..."):
+                t0 = time.perf_counter()
                 try:
                     sobol_samples = 256 if cpu_saver else 512
                     sobol_result = run_sobol_service(
@@ -2368,8 +2453,10 @@ def main() -> None:
                     )
                     st.session_state["sobol_result"] = sobol_result
                     st.session_state["sobol_context_key"] = sim_context_key
+                    _record_runtime_metric("sobol", ok=True, context_key=sim_context_key, duration_sec=time.perf_counter() - t0)
                 except Exception as exc:
                     st.error(f"Ошибка Sobol-анализа: {exc}")
+                    _record_runtime_metric("sobol", ok=False, context_key=sim_context_key, duration_sec=time.perf_counter() - t0, error=str(exc))
 
         sobol_result = st.session_state.get("sobol_result")
         sobol_context_key = st.session_state.get("sobol_context_key")
@@ -2378,7 +2465,12 @@ def main() -> None:
             if sobol_stale:
                 st.warning("Показан результат Sobol для предыдущих параметров. Нажмите кнопку для пересчета.")
             sobol_chart_key = f"sobol_{asset_type}_{ticker or 'imoex'}_{regime}"
-            sobol_fig = go.Figure(sobol_result["figure"])
+            sobol_fig = _safe_figure_from_result(
+                sobol_result,
+                key="figure",
+                title="Sobol-анализ",
+                message="Не удалось отрисовать Tornado chart. Пересчитайте Sobol-анализ.",
+            )
             sobol_fig.update_layout(clickmode="event+select")
             sobol_selection = st.plotly_chart(
                 sobol_fig,
