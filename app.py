@@ -2308,7 +2308,6 @@ def main() -> None:
             mc_chart_key = f"mc_hist_{asset_type}_{ticker or 'imoex'}_{regime}"
             mc_fig = go.Figure(mc_result["figure"])
             mc_fig.update_layout(clickmode="event+select")
-            mc_fig.update_layout(autosize=True, width=None, height=500)
             if plotly_events is not None:
                 mc_points = plotly_events(
                     mc_fig,
@@ -2317,7 +2316,6 @@ def main() -> None:
                     hover_event=False,
                     key=f"{mc_chart_key}_events",
                     override_height=450,
-                    override_width="100%",
                 )
                 mc_selection = {"points": mc_points} if mc_points else None
             else:
@@ -2392,7 +2390,6 @@ def main() -> None:
             sobol_chart_key = f"sobol_{asset_type}_{ticker or 'imoex'}_{regime}"
             sobol_fig = go.Figure(sobol_result["figure"])
             sobol_fig.update_layout(clickmode="event+select")
-            sobol_fig.update_layout(autosize=True, width=None, height=500)
             if plotly_events is not None:
                 sobol_points = plotly_events(
                     sobol_fig,
@@ -2401,7 +2398,6 @@ def main() -> None:
                     hover_event=False,
                     key=f"{sobol_chart_key}_events",
                     override_height=450,
-                    override_width="100%",
                 )
                 sobol_selection = {"points": sobol_points} if sobol_points else None
             else:
