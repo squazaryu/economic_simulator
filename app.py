@@ -2312,7 +2312,7 @@ def main() -> None:
             mc_selected_key = f"{mc_detail_prefix}_selected_idx"
             mc_fig = go.Figure(mc_result["figure"])
             mc_fig.update_layout(clickmode="event+select")
-            mc_fig.update_layout(height=500)
+            mc_fig.update_layout(autosize=True, width=None, height=500)
             preselected_idx = st.session_state.get(mc_selected_key)
             if (
                 isinstance(preselected_idx, int)
@@ -2411,7 +2411,7 @@ def main() -> None:
             sobol_selected_key = f"{sobol_detail_prefix}_selected_idx"
             sobol_fig = go.Figure(sobol_result["figure"])
             sobol_fig.update_layout(clickmode="event+select")
-            sobol_fig.update_layout(height=500)
+            sobol_fig.update_layout(autosize=True, width=None, height=500)
             preselected_sobol_idx = st.session_state.get(sobol_selected_key)
             sobol_df_curr = sobol_result.get("sobol_df")
             if (
