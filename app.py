@@ -1228,6 +1228,10 @@ def _plotly_selected_points(selection: Any) -> list[dict[str, Any]]:
                 continue
 
         if isinstance(candidate, dict):
+            nested = candidate.get("selection")
+            if isinstance(nested, dict):
+                candidates.append(nested)
+
             points = candidate.get("points", [])
             if isinstance(points, list):
                 normalized: list[dict[str, Any]] = []
@@ -1253,6 +1257,17 @@ def _plotly_selected_points(selection: Any) -> list[dict[str, Any]]:
                     if isinstance(pvars, dict):
                         normalized.append(pvars)
                 return normalized
+
+            # Streamlit может возвращать выделение без `points`,
+            # только как набор индексов (`point_indices`/`point_numbers`).
+            for key in ("point_indices", "pointIndices", "point_numbers", "pointNumbers"):
+                raw = candidate.get(key)
+                if raw is None:
+                    continue
+                if isinstance(raw, np.ndarray):
+                    raw = raw.tolist()
+                if isinstance(raw, (list, tuple)):
+                    return [{key: raw}]
 
     return []
 
