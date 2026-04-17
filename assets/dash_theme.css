@@ -1,0 +1,71 @@
+.app-shell {
+  background: radial-gradient(1200px 600px at 20% 0%, #1f2937 0%, #0b1220 55%, #070b14 100%);
+  min-height: 100vh;
+  color: #e5e7eb;
+  font-family: "IBM Plex Sans", "Segoe UI", Arial, sans-serif;
+}
+
+.title {
+  margin: 0 0 14px 0;
+  color: #f8fafc;
+  letter-spacing: 0.2px;
+}
+
+.tabs {
+  background: transparent;
+  margin-bottom: 14px;
+}
+
+.tab {
+  background: rgba(17, 24, 39, 0.65) !important;
+  border: 1px solid rgba(148, 163, 184, 0.25) !important;
+  color: #cbd5e1 !important;
+  padding: 10px 14px !important;
+}
+
+.tab--selected {
+  background: rgba(30, 41, 59, 0.9) !important;
+  border-top: 2px solid #38bdf8 !important;
+  color: #f8fafc !important;
+}
+
+.card {
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 12px;
+  padding: 14px;
+  margin-bottom: 14px;
+  box-shadow: 0 10px 30px rgba(2, 6, 23, 0.25);
+}
+
+.label {
+  display: block;
+  font-weight: 600;
+  margin-top: 8px;
+  margin-bottom: 6px;
+  color: #e2e8f0;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #0ea5e9, #0284c7);
+  color: #ffffff;
+  border: none;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-primary:hover {
+  filter: brightness(1.07);
+}
+
+.hint {
+  color: #93c5fd;
+  margin-top: 4px;
+}
+
+.graph {
+  border-radius: 12px;
+}
+

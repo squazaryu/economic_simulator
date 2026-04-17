@@ -50,12 +50,15 @@ def _build_historical_chart(df: pd.DataFrame) -> go.Figure:
     fig.add_trace(go.Scatter(x=df["date"], y=df["usd_rub"], name="USD/RUB", mode="lines", yaxis="y2"))
     fig.add_trace(go.Scatter(x=df["date"], y=df["key_rate"], name="Ключевая ставка", mode="lines", yaxis="y2"))
     fig.update_layout(
-        template="plotly_white",
+        template="plotly_dark",
         title="Историческая динамика: IMOEX и макрофакторы",
         xaxis_title="Дата",
         yaxis=dict(title="IMOEX"),
         yaxis2=dict(title="Макрофакторы", overlaying="y", side="right"),
         legend=dict(orientation="h"),
+        paper_bgcolor="#111827",
+        plot_bgcolor="#111827",
+        margin=dict(l=40, r=40, t=60, b=40),
     )
     return fig
 
@@ -73,7 +76,13 @@ def _build_corr_fig(df: pd.DataFrame) -> go.Figure:
     corr.index = [label_map[c] for c in corr.index]
     corr.columns = [label_map[c] for c in corr.columns]
     fig = px.imshow(corr, text_auto=".2f", zmin=-1, zmax=1, color_continuous_scale="RdBu_r")
-    fig.update_layout(template="plotly_white", title="Корреляционная матрица")
+    fig.update_layout(
+        template="plotly_dark",
+        title="Корреляционная матрица",
+        paper_bgcolor="#111827",
+        plot_bgcolor="#111827",
+        margin=dict(l=40, r=40, t=60, b=40),
+    )
     return fig
 
 
@@ -103,29 +112,46 @@ def _asset_current(df: pd.DataFrame, asset_type: str, ticker: str) -> float:
 
 def build_layout(df: pd.DataFrame) -> html.Div:
     default = df.iloc[-1]
+    slider_common = {
+        "marks": None,
+        "tooltip": {"placement": "bottom", "always_visible": True},
+    }
     return html.Div(
         [
-            html.H2("Экономический симулятор сценариев (Dash)"),
+            html.H2("Экономический симулятор сценариев (Dash)", className="title"),
             dcc.Tabs(
                 id="tabs",
                 value="tab-history",
+                className="tabs",
                 children=[
                     dcc.Tab(
                         label="📊 Исторические данные",
                         value="tab-history",
+                        className="tab",
+                        selected_className="tab--selected",
                         children=[
-                            dcc.Graph(id="hist-chart", figure=_build_historical_chart(df)),
-                            dcc.Graph(id="corr-chart", figure=_build_corr_fig(df)),
-                            html.Div("Пояснение: корреляция показывает линейную связь факторов от -1 до +1."),
+                            html.Div(
+                                [
+                                    dcc.Graph(id="hist-chart", figure=_build_historical_chart(df), className="graph"),
+                                    dcc.Graph(id="corr-chart", figure=_build_corr_fig(df), className="graph"),
+                                    html.Div(
+                                        "Пояснение: корреляция показывает линейную связь факторов от -1 до +1.",
+                                        className="hint",
+                                    ),
+                                ],
+                                className="card",
+                            ),
                         ],
                     ),
                     dcc.Tab(
                         label="🎯 Сценарный анализ",
                         value="tab-scenario",
+                        className="tab",
+                        selected_className="tab--selected",
                         children=[
                             html.Div(
                                 [
-                                    html.Label("Целевой актив"),
+                                    html.Label("Целевой актив", className="label"),
                                     dcc.RadioItems(
                                         id="asset-type",
                                         options=[
@@ -135,56 +161,89 @@ def build_layout(df: pd.DataFrame) -> html.Div:
                                         value="imoex",
                                         inline=True,
                                     ),
-                                    html.Label("Тикер (для акции)"),
+                                    html.Label("Тикер (для акции)", className="label"),
                                     dcc.Dropdown(id="ticker", options=_ticker_options(), value="LKOH", clearable=False),
-                                    html.Label("Режим модели"),
+                                    html.Label("Режим модели", className="label"),
                                     dcc.Dropdown(id="regime", options=REGIME_OPTIONS, value="all", clearable=False),
-                                    html.Label("Brent"),
-                                    dcc.Slider(id="oil", min=30, max=130, step=5, value=float(default["brent_usd"])),
-                                    html.Label("Ключевая ставка"),
-                                    dcc.Slider(id="key-rate", min=5, max=30, step=0.5, value=float(default["key_rate"])),
-                                    html.Label("USD/RUB"),
-                                    dcc.Slider(id="usd-rub", min=60, max=150, step=1, value=float(default["usd_rub"])),
-                                    html.Label("Инфляция"),
-                                    dcc.Slider(id="inflation", min=2, max=20, step=0.5, value=float(default["inflation"])),
+                                    html.Label("Brent", className="label"),
+                                    dcc.Slider(
+                                        id="oil",
+                                        min=30,
+                                        max=130,
+                                        step=5,
+                                        value=float(default["brent_usd"]),
+                                        **slider_common,
+                                    ),
+                                    html.Label("Ключевая ставка", className="label"),
+                                    dcc.Slider(
+                                        id="key-rate",
+                                        min=5,
+                                        max=30,
+                                        step=0.5,
+                                        value=float(default["key_rate"]),
+                                        **slider_common,
+                                    ),
+                                    html.Label("USD/RUB", className="label"),
+                                    dcc.Slider(
+                                        id="usd-rub",
+                                        min=60,
+                                        max=150,
+                                        step=1,
+                                        value=float(default["usd_rub"]),
+                                        **slider_common,
+                                    ),
+                                    html.Label("Инфляция", className="label"),
+                                    dcc.Slider(
+                                        id="inflation",
+                                        min=2,
+                                        max=20,
+                                        step=0.5,
+                                        value=float(default["inflation"]),
+                                        **slider_common,
+                                    ),
                                 ]
-                            ),
+                            , className="card"),
                             html.Br(),
-                            html.Button("Рассчитать сценарий", id="run-scenario", n_clicks=0),
-                            html.Div(id="scenario-output", style={"marginTop": "16px"}),
+                            html.Button("Рассчитать сценарий", id="run-scenario", n_clicks=0, className="btn-primary"),
+                            html.Div(id="scenario-output", style={"marginTop": "16px"}, className="card"),
                         ],
                     ),
                     dcc.Tab(
                         label="🎲 Монте-Карло",
                         value="tab-mc",
+                        className="tab",
+                        selected_className="tab--selected",
                         children=[
-                            html.Button("Запустить Monte Carlo", id="run-mc", n_clicks=0),
-                            dcc.Graph(id="mc-fig"),
+                            html.Button("Запустить Monte Carlo", id="run-mc", n_clicks=0, className="btn-primary"),
+                            dcc.Graph(id="mc-fig", className="graph"),
                             html.Div(
                                 [
-                                    html.Label("Диапазон (бин)"),
+                                    html.Label("Диапазон (бин)", className="label"),
                                     dcc.Dropdown(id="mc-bin-select", clearable=False),
                                 ]
-                            ),
-                            html.Div(id="mc-stats"),
+                            , className="card"),
+                            html.Div(id="mc-stats", className="card"),
                             dcc.Store(id="mc-store"),
                         ],
                     ),
                     dcc.Tab(
                         label="🌪️ Чувствительность",
                         value="tab-sobol",
+                        className="tab",
+                        selected_className="tab--selected",
                         children=[
-                            html.Button("Рассчитать Sobol", id="run-sobol", n_clicks=0),
-                            dcc.Graph(id="sobol-fig"),
-                            html.Div([html.Label("Фактор"), dcc.Dropdown(id="sobol-factor-select", clearable=False)]),
-                            html.Div(id="sobol-stats"),
+                            html.Button("Рассчитать Sobol", id="run-sobol", n_clicks=0, className="btn-primary"),
+                            dcc.Graph(id="sobol-fig", className="graph"),
+                            html.Div([html.Label("Фактор", className="label"), dcc.Dropdown(id="sobol-factor-select", clearable=False)], className="card"),
+                            html.Div(id="sobol-stats", className="card"),
                             dcc.Store(id="sobol-store"),
                         ],
                     ),
                 ],
             ),
         ],
-        style={"maxWidth": "1400px", "margin": "0 auto", "padding": "12px"},
+        style={"maxWidth": "1500px", "margin": "0 auto", "padding": "16px"},
+        className="app-shell",
     )
 
 
@@ -275,18 +334,25 @@ def run_mc_cb(
     bins["label"] = bins.apply(lambda r: f"{int(r['bin_index'])+1}: {r['left']:.1f} .. {r['right']:.1f}", axis=1)
     options = [{"label": l, "value": l} for l in bins["label"].tolist()]
     value = options[0]["value"] if options else None
+    fig = go.Figure(result["figure"])
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="#111827",
+        plot_bgcolor="#111827",
+        margin=dict(l=40, r=40, t=60, b=40),
+    )
+    safe_bins = bins.replace({np.nan: None}).to_dict("records")
     store = {
-        "var_5": result["var_5"],
-        "p50": result["p50"],
-        "var_95": result["var_95"],
-        "prob_drop_20": result["prob_drop_20"],
-        "n_simulations": result["n_simulations"],
-        "asset_label": result["asset_label"],
-        "current_level": result["current_level"],
-        "hist_bins": bins.to_dict("records"),
-        "figure": result["figure"].to_dict(),
+        "var_5": float(result["var_5"]),
+        "p50": float(result["p50"]),
+        "var_95": float(result["var_95"]),
+        "prob_drop_20": float(result["prob_drop_20"]),
+        "n_simulations": int(result["n_simulations"]),
+        "asset_label": str(result["asset_label"]),
+        "current_level": float(result["current_level"]),
+        "hist_bins": safe_bins,
     }
-    return result["figure"], store, options, value
+    return fig, store, options, value
 
 
 @callback(
@@ -360,14 +426,21 @@ def run_sobol_cb(_n: int, asset_type: str, ticker: str, regime: str):
     labels = sobol_df["factor_label"].astype(str).tolist()
     options = [{"label": x, "value": x} for x in labels]
     value = labels[0] if labels else None
+    fig = go.Figure(result["figure"])
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="#111827",
+        plot_bgcolor="#111827",
+        margin=dict(l=40, r=40, t=60, b=40),
+    )
     store = {
-        "sobol_df": sobol_df.to_dict("records"),
-        "top_factor": result["top_factor"],
-        "top_s1": result["top_s1"],
-        "y_variance": result["y_variance"],
+        "sobol_df": sobol_df.replace({np.nan: None}).to_dict("records"),
+        "top_factor": str(result["top_factor"]),
+        "top_s1": float(result["top_s1"]),
+        "y_variance": float(result["y_variance"]),
         "problem": result["problem"],
     }
-    return result["figure"], store, options, value
+    return fig, store, options, value
 
 
 @callback(
@@ -422,4 +495,3 @@ def create_app() -> Dash:
 if __name__ == "__main__":
     app = create_app()
     app.run(host="0.0.0.0", port=8050, debug=True)
-
